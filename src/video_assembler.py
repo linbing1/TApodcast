@@ -25,31 +25,35 @@ def assemble_video(
     output_path: str,
 ) -> str:
     duration = get_audio_duration(mp3_path)
+    per_image = 4.0
+
+    # Build cycled image list to cover the full audio duration
     n = len(image_paths)
-    per_image = duration / n
+    total_slots = max(1, int(duration / per_image) + 1)
+    cycled = [image_paths[i % n] for i in range(total_slots)]
 
     concat_path = os.path.join(os.path.dirname(output_path), "concat.txt")
     with open(concat_path, "w") as f:
-        for path in image_paths:
+        for path in cycled:
             f.write(f"file '{os.path.abspath(path)}'\n")
             f.write(f"duration {per_image:.3f}\n")
-        f.write(f"file '{os.path.abspath(image_paths[-1])}'\n")
+        f.write(f"file '{os.path.abspath(cycled[-1])}'\n")
 
-    # Scale image to fill 1080x1920 (crop center); burn subtitles if libass is available
+    # Scale image to fit 1080x1920 with black letterbox; burn subtitles if libass is available
     abs_srt = os.path.abspath(srt_path)
+    letterbox = (
+        "scale=1080:1920:force_original_aspect_ratio=decrease,"
+        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+    )
     has_libass = "subtitles" in subprocess.run(
         ["ffmpeg", "-filters"], capture_output=True, text=True
     ).stdout
     if has_libass:
         force_style = "FontSize=22\\,PrimaryColour=&Hffffff\\,OutlineColour=&H000000\\,Outline=2\\,Alignment=2"
-        vf = (
-            "scale=1080:1920:force_original_aspect_ratio=increase,"
-            "crop=1080:1920,"
-            f"subtitles='{abs_srt}':force_style={force_style}"
-        )
+        vf = f"{letterbox},subtitles='{abs_srt}':force_style={force_style}"
     else:
         logger.warning("libass not available — producing video without burned subtitles")
-        vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
+        vf = letterbox
 
     cmd = [
         "ffmpeg", "-y",

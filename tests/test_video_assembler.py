@@ -64,4 +64,4 @@ class TestAssembleVideo:
         concat_path = str(tmp_path / "concat.txt")
         assert os.path.exists(concat_path)
         content = open(concat_path).read()
-        assert "duration 15.000" in content  # 30s / 2 images
+        assert "duration 4.000" in content  # fixed 4s per image

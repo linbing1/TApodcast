@@ -19,6 +19,7 @@ def get_config() -> dict:
             "LLM_BASE_URL", "https://open.bigmodel.cn/api/coding/paas/v4"
         ),
         "llm_api_key": os.environ.get("LLM_API_KEY", ""),
-        "llm_model": os.environ.get("LLM_MODEL", "deepseek-chat"),
-        "tts_voice": os.environ.get("TTS_VOICE", "zh-CN-XiaoxiaoNeural"),
+        "llm_model": os.environ.get("LLM_MODEL", "glm-4.7"),
+        "tts_voice": os.environ.get("TTS_VOICE", "zh-CN-YunjianNeural"),
+        "tts_rate": os.environ.get("TTS_RATE", "+40%"),
     }

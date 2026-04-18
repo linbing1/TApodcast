@@ -19,8 +19,9 @@ class TestGetConfig:
         env = {"ATHLETIC_COOKIES": "[]", "LLM_API_KEY": "sk-test"}
         with patch.dict("os.environ", env, clear=True):
             config = get_config()
-        assert config["llm_model"] == "deepseek-chat"
-        assert config["tts_voice"] == "zh-CN-XiaoxiaoNeural"
+        assert config["llm_model"] == "glm-4.7"
+        assert config["tts_voice"] == "zh-CN-YunjianNeural"
+        assert config["tts_rate"] == "+40%"
 
     def test_invalid_cookies_json_defaults_to_empty_list(self):
         env = {"ATHLETIC_COOKIES": "not-json", "LLM_API_KEY": "sk-test"}

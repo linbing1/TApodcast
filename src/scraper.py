@@ -54,9 +54,14 @@ async def _extract_page_data(page: Page, url: str) -> tuple[str, str, list[str]]
             if len(text) > 100:
                 break
 
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    await page.wait_for_timeout(2000)
+    await page.evaluate("window.scrollTo(0, 0)")
+    await page.wait_for_timeout(500)
+
     image_urls: list[str] = await page.evaluate(
         """() => Array.from(document.querySelectorAll('img'))
-            .filter(img => img.naturalWidth >= 300 && img.naturalHeight >= 300)
+            .filter(img => img.naturalWidth >= 300)
             .map(img => img.src)
             .filter(src => src && src.startsWith('http'))"""
     )

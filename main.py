@@ -49,7 +49,7 @@ async def run(url: str) -> None:
     logger.info("Script: %d chars", len(script.text))
 
     logger.info("Step 4: Generating audio with edge-tts...")
-    mp3_path, srt_path = await generate_tts(script, config["tts_voice"], output_dir)
+    mp3_path, srt_path = await generate_tts(script, config["tts_voice"], output_dir, config["tts_rate"])
 
     logger.info("Step 5: Assembling video with ffmpeg...")
     video_path = os.path.join(output_dir, "video.mp4")

@@ -8,11 +8,11 @@ from src.models import PodcastScript
 logger = logging.getLogger(__name__)
 
 
-async def generate_tts(script: PodcastScript, voice: str, output_dir: str) -> tuple[str, str]:
+async def generate_tts(script: PodcastScript, voice: str, output_dir: str, rate: str = "+0%") -> tuple[str, str]:
     mp3_path = os.path.join(output_dir, "audio.mp3")
     srt_path = os.path.join(output_dir, "audio.vtt")
 
-    communicate = edge_tts.Communicate(script.text, voice)
+    communicate = edge_tts.Communicate(script.text, voice, rate=rate)
     submaker = edge_tts.SubMaker()
 
     with open(mp3_path, "wb") as mp3_file:
