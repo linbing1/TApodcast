@@ -24,7 +24,76 @@ _SYSTEM_PROMPT = """你是一位资深英超足球记者和分析师。请对以
 - impact: 影响分析与展望，包含短期和中长期影响（中文）
 - link: 原文链接
 
-仅返回 JSON 对象，不要添加任何其他文字。"""
+重要格式要求：
+- 仅返回 JSON 对象，不要添加任何其他文字
+- 所有字符串值内部禁止使用英文双引号 "，如需引用请使用『』或「」
+- 确保输出是合法的 JSON 格式"""
+
+
+def _escape_interior_quotes(text: str) -> str:
+    """Escape unescaped double quotes inside JSON string values using a state machine."""
+    out = []
+    in_string = False
+    containers: list[str] = []  # 'o' for object, 'a' for array
+    expect_key = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if ch == "\\":
+                out.append(ch)
+                i += 1
+                if i < n:
+                    out.append(text[i])
+                    i += 1
+                continue
+            elif ch == '"':
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if expect_key:
+                    if j < n and text[j] == ":":
+                        in_string = False
+                        expect_key = False
+                        out.append(ch)
+                    else:
+                        out.append('\\"')
+                else:
+                    if j >= n or text[j] in ",}]":
+                        in_string = False
+                        out.append(ch)
+                    else:
+                        out.append('\\"')
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+                out.append(ch)
+            elif ch == "{":
+                containers.append("o")
+                expect_key = True
+                out.append(ch)
+            elif ch == "[":
+                containers.append("a")
+                expect_key = False
+                out.append(ch)
+            elif ch in "}]":
+                if containers:
+                    containers.pop()
+                expect_key = False
+                out.append(ch)
+            elif ch == ":":
+                expect_key = False
+                out.append(ch)
+            elif ch == ",":
+                expect_key = bool(containers and containers[-1] == "o")
+                out.append(ch)
+            else:
+                out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _parse_response(response: str) -> dict:
@@ -32,10 +101,14 @@ def _parse_response(response: str) -> dict:
     if text.startswith("```"):
         text = text.split("\n", 1)[1]
         text = text.rsplit("```", 1)[0]
+    text = text.strip()
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse LLM response as JSON: {response[:200]}") from e
+    except json.JSONDecodeError:
+        try:
+            data = json.loads(_escape_interior_quotes(text))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse LLM response as JSON: {response[:200]}") from e
     if isinstance(data, list):
         data = data[0] if data else {}
     return data
@@ -46,6 +119,7 @@ def analyze_article(article: ScrapedArticle, llm: LLMClient) -> AnalyzedArticle:
     response = llm.complete(_SYSTEM_PROMPT, user_text)
     data = _parse_response(response)
     filtered = {k: v for k, v in data.items() if k in _ANALYZED_FIELDS}
+    filtered.setdefault("link", article.link)
     try:
         return AnalyzedArticle(**filtered)
     except TypeError as e:

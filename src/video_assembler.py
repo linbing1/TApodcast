@@ -35,14 +35,21 @@ def assemble_video(
             f.write(f"duration {per_image:.3f}\n")
         f.write(f"file '{os.path.abspath(image_paths[-1])}'\n")
 
-    # Scale image to fill 1080x1920 (crop center), burn subtitles
+    # Scale image to fill 1080x1920 (crop center); burn subtitles if libass is available
     abs_srt = os.path.abspath(srt_path)
-    vf = (
-        "scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,"
-        f"subtitles='{abs_srt}':force_style="
-        "'FontSize=22,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2,Alignment=2'"
-    )
+    has_libass = "subtitles" in subprocess.run(
+        ["ffmpeg", "-filters"], capture_output=True, text=True
+    ).stdout
+    if has_libass:
+        force_style = "FontSize=22\\,PrimaryColour=&Hffffff\\,OutlineColour=&H000000\\,Outline=2\\,Alignment=2"
+        vf = (
+            "scale=1080:1920:force_original_aspect_ratio=increase,"
+            "crop=1080:1920,"
+            f"subtitles='{abs_srt}':force_style={force_style}"
+        )
+    else:
+        logger.warning("libass not available — producing video without burned subtitles")
+        vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
 
     cmd = [
         "ffmpeg", "-y",

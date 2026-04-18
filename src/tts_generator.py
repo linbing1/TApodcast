@@ -20,10 +20,10 @@ async def generate_tts(script: PodcastScript, voice: str, output_dir: str) -> tu
             if chunk["type"] == "audio":
                 mp3_file.write(chunk["data"])
             elif chunk["type"] == "WordBoundary":
-                submaker.create_sub((chunk["offset"], chunk["duration"]), chunk["text"])
+                submaker.feed(chunk)
 
     with open(srt_path, "w", encoding="utf-8") as srt_file:
-        srt_file.write(submaker.generate_subs())
+        srt_file.write(submaker.get_srt())
 
     logger.info("Generated audio: %s, subtitles: %s", mp3_path, srt_path)
     return mp3_path, srt_path
