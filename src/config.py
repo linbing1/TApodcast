@@ -1,0 +1,24 @@
+import json
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+
+
+def get_config() -> dict:
+    cookie_raw = os.environ.get("ATHLETIC_COOKIES", "[]")
+    try:
+        cookies = json.loads(cookie_raw)
+    except json.JSONDecodeError:
+        logger.error("ATHLETIC_COOKIES is not valid JSON, using empty list")
+        cookies = []
+
+    return {
+        "athletic_cookies": cookies,
+        "llm_base_url": os.environ.get(
+            "LLM_BASE_URL", "https://open.bigmodel.cn/api/coding/paas/v4"
+        ),
+        "llm_api_key": os.environ.get("LLM_API_KEY", ""),
+        "llm_model": os.environ.get("LLM_MODEL", "deepseek-chat"),
+        "tts_voice": os.environ.get("TTS_VOICE", "zh-CN-XiaoxiaoNeural"),
+    }
