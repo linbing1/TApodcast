@@ -46,4 +46,8 @@ def analyze_article(article: ScrapedArticle, llm: LLMClient) -> AnalyzedArticle:
     response = llm.complete(_SYSTEM_PROMPT, user_text)
     data = _parse_response(response)
     filtered = {k: v for k, v in data.items() if k in _ANALYZED_FIELDS}
-    return AnalyzedArticle(**filtered)
+    try:
+        return AnalyzedArticle(**filtered)
+    except TypeError as e:
+        missing = _ANALYZED_FIELDS - set(filtered)
+        raise ValueError(f"LLM response missing required fields {missing}: {response[:200]}") from e

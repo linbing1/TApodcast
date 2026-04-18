@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 async def generate_tts(script: PodcastScript, voice: str, output_dir: str) -> tuple[str, str]:
     mp3_path = os.path.join(output_dir, "audio.mp3")
-    srt_path = os.path.join(output_dir, "audio.srt")
+    srt_path = os.path.join(output_dir, "audio.vtt")
 
     communicate = edge_tts.Communicate(script.text, voice)
     submaker = edge_tts.SubMaker()
