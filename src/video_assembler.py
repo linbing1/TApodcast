@@ -56,6 +56,10 @@ def assemble_video(
     ]
 
     logger.info("Running ffmpeg to assemble video...")
-    subprocess.run(cmd, check=True, capture_output=True)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        logger.error("ffmpeg failed:\n%s", e.stderr.decode(errors="replace"))
+        raise
     logger.info("Video saved to %s", output_path)
     return output_path

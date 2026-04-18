@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 from datetime import date
+from urllib.parse import urlparse
 
 from src.analyzer import analyze_article
 from src.config import get_config
@@ -20,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 
 def _article_slug(url: str) -> str:
-    parts = [p for p in url.rstrip("/").split("/") if p]
+    path = urlparse(url).path.rstrip("/")
+    parts = [p for p in path.split("/") if p]
     slug = parts[-1] if parts else "article"
     return slug[:60]
 
