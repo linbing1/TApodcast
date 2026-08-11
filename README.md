@@ -51,6 +51,34 @@ Cookie 导出推荐使用 [Cookie-Editor](https://cookie-editor.com/) 浏览器�
 
 输出文件保存在 `output/YYYY-MM-DD/<article-slug>/video.mp4`。
 
+### 只解析网页内容
+
+第一阶段可以只提取文章标题、主要文字、图片和视频清单，不执行 LLM、TTS 或视频合成：
+
+```bash
+.venv/bin/python main.py extract --url "https://www.nytimes.com/athletic/ARTICLE_ID/..."
+```
+
+默认输出到 `output/YYYY-MM-DD/<article-slug>/`，也可以通过 `--dir` 指定目录：
+
+```text
+page.json      # 完整结构化内容清单
+text.txt       # 清理后的主要文字
+images.json    # 图片 URL、尺寸和 alt 文本
+videos.json    # 视频、iframe 或 JSON-LD 视频清单
+```
+
+### 下载图片
+
+从已经生成的 `page.json` 下载并校验文章图片：
+
+```bash
+.venv/bin/python main.py download-images \
+  --dir "output/YYYY-MM-DD/<article-slug>"
+```
+
+图片会保存到 `images/`，`images.json` 会记录每张图片的本地路径、下载状态和失败原因。
+
 ## 输出示例
 
 ```

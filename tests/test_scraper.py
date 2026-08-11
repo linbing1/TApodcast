@@ -1,11 +1,16 @@
-import io
-import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from PIL import Image as PILImage
 
-from src.scraper import scrape_article
+from src.models import ImageAsset, PageContent
+from src.scraper import (
+    _clean_main_text,
+    _extract_jsonld_images,
+    _merge_images,
+    download_images,
+    scrape_article,
+)
 
 
 def _make_pil_mock(width: int = 800, height: int = 600) -> MagicMock:
@@ -18,18 +23,125 @@ def _make_pil_mock(width: int = 800, height: int = 600) -> MagicMock:
     return img
 
 
+def test_clean_main_text_removes_related_reading_block():
+    text = """First paragraph.
+
+WHAT YOU SHOULD READ NEXT
+Related headline one
+Related headline two
+
+Second paragraph."""
+
+    assert _clean_main_text(text) == "First paragraph.\n\nSecond paragraph."
+
+
+def test_extract_jsonld_images_keeps_one_crop_and_metadata():
+    raw_script = """{
+        "@type": "NewsArticle",
+        "image": [
+            {
+                "@type": "ImageObject",
+                "contentUrl": "https://cdn.example.com/lead.jpg?width=1200&height=675&fit=cover",
+                "width": "1200",
+                "height": "675",
+                "caption": "Xabi Alonso gives instructions to Cole Palmer",
+                "alternateName": "Xabi Alonso and Cole Palmer in Sydney",
+                "creditText": "Robbie Stephenson - PA Images via Getty Images"
+            },
+            {
+                "@type": "ImageObject",
+                "contentUrl": "https://cdn.example.com/lead.jpg?width=1200&height=900&fit=cover"
+            }
+        ],
+        "thumbnailUrl": "https://cdn.example.com/lead.jpg"
+    }"""
+
+    images = _extract_jsonld_images([raw_script], "https://example.com/article")
+
+    assert images == [ImageAsset(
+        url="https://cdn.example.com/lead.jpg?width=1200&height=675&fit=cover",
+        alt="Xabi Alonso and Cole Palmer in Sydney",
+        caption="Xabi Alonso gives instructions to Cole Palmer",
+        credit="Robbie Stephenson - PA Images via Getty Images",
+        width=1200,
+        height=675,
+    )]
+
+
+def test_merge_images_prefers_jsonld_order_and_enriches_metadata():
+    jsonld = ImageAsset(
+        url="https://cdn.example.com/lead.jpg?width=1200&height=675&fit=cover",
+        caption="Lead caption",
+        credit="Photo credit",
+    )
+    dom = ImageAsset(
+        url="https://cdn.example.com/lead.jpg?width=800",
+        alt="Lead alt text",
+        width=800,
+        height=450,
+    )
+
+    assert _merge_images([jsonld], [dom]) == [ImageAsset(
+        url=jsonld.url,
+        alt="Lead alt text",
+        caption="Lead caption",
+        credit="Photo credit",
+        width=800,
+        height=450,
+    )]
+
+
+@pytest.mark.asyncio
+@patch("src.scraper.PILImage")
+@patch("src.scraper.httpx.AsyncClient")
+async def test_download_images_returns_local_manifest(
+    mock_httpx_cls, mock_pil, tmp_path
+):
+    mock_client = AsyncMock()
+    mock_httpx_cls.return_value.__aenter__.return_value = mock_client
+    mock_response = AsyncMock()
+    mock_response.content = b"fake-image-data"
+    mock_response.raise_for_status = MagicMock()
+    mock_client.get.return_value = mock_response
+    mock_pil.open.return_value = _make_pil_mock(800, 600)
+
+    records = await download_images(
+        [ImageAsset(url="https://cdn.example.com/image.jpg", alt="Team")],
+        str(tmp_path),
+        referer="https://example.com/article",
+        cookies=[{"name": "sid", "value": "abc"}],
+    )
+
+    assert records == [{
+        "url": "https://cdn.example.com/image.jpg",
+        "local_path": "images/000.jpg",
+        "status": "downloaded",
+        "error": None,
+        "alt": "Team",
+        "caption": "",
+        "credit": "",
+        "width": None,
+        "height": None,
+    }]
+    headers = mock_client.get.call_args.kwargs["headers"]
+    assert headers["Referer"] == "https://example.com/article"
+    assert headers["Cookie"] == "sid=abc"
+
+
 class TestScrapeArticle:
     @pytest.mark.asyncio
     @patch("src.scraper.PILImage")
     @patch("src.scraper.httpx.AsyncClient")
-    @patch("src.scraper._extract_page_data", new_callable=AsyncMock)
-    @patch("src.scraper.async_playwright")
-    async def test_returns_scraped_article(self, mock_pw, mock_extract, mock_httpx_cls, mock_pil, tmp_path):
-        _setup_playwright_mock(mock_pw)
-        mock_extract.return_value = (
-            "Arsenal vs City match report",
-            "Arsenal Win",
-            ["https://cdn.example.com/img1.jpg", "https://cdn.example.com/img2.jpg"],
+    @patch("src.scraper.extract_page_content", new_callable=AsyncMock)
+    async def test_returns_scraped_article(self, mock_extract, mock_httpx_cls, mock_pil, tmp_path):
+        mock_extract.return_value = PageContent(
+            url="https://example.com/article",
+            title="Arsenal Win",
+            main_text="Arsenal vs City match report",
+            images=[
+                ImageAsset(url="https://cdn.example.com/img1.jpg"),
+                ImageAsset(url="https://cdn.example.com/img2.jpg"),
+            ],
         )
         mock_client = AsyncMock()
         mock_httpx_cls.return_value.__aenter__.return_value = mock_client
@@ -48,11 +160,13 @@ class TestScrapeArticle:
         assert len(article.image_paths) == 2
 
     @pytest.mark.asyncio
-    @patch("src.scraper._extract_page_data", new_callable=AsyncMock)
-    @patch("src.scraper.async_playwright")
-    async def test_raises_if_no_images(self, mock_pw, mock_extract, tmp_path):
-        _setup_playwright_mock(mock_pw)
-        mock_extract.return_value = ("Some text", "Title", [])
+    @patch("src.scraper.extract_page_content", new_callable=AsyncMock)
+    async def test_raises_if_no_images(self, mock_extract, tmp_path):
+        mock_extract.return_value = PageContent(
+            url="https://example.com/article",
+            title="Title",
+            main_text="Some text",
+        )
 
         with pytest.raises(ValueError, match="No images found"):
             await scrape_article(
@@ -63,13 +177,16 @@ class TestScrapeArticle:
     @patch("src.scraper.asyncio.sleep", new_callable=AsyncMock)
     @patch("src.scraper.PILImage")
     @patch("src.scraper.httpx.AsyncClient")
-    @patch("src.scraper._extract_page_data", new_callable=AsyncMock)
-    @patch("src.scraper.async_playwright")
-    async def test_skips_failed_image_downloads(self, mock_pw, mock_extract, mock_httpx_cls, mock_pil, mock_sleep, tmp_path):
-        _setup_playwright_mock(mock_pw)
-        mock_extract.return_value = (
-            "text", "Title",
-            ["https://cdn.example.com/img1.jpg", "https://cdn.example.com/img2.jpg"],
+    @patch("src.scraper.extract_page_content", new_callable=AsyncMock)
+    async def test_skips_failed_image_downloads(self, mock_extract, mock_httpx_cls, mock_pil, mock_sleep, tmp_path):
+        mock_extract.return_value = PageContent(
+            url="https://example.com/article",
+            title="Title",
+            main_text="text",
+            images=[
+                ImageAsset(url="https://cdn.example.com/img1.jpg"),
+                ImageAsset(url="https://cdn.example.com/img2.jpg"),
+            ],
         )
         mock_client = AsyncMock()
         mock_httpx_cls.return_value.__aenter__.return_value = mock_client
@@ -87,14 +204,3 @@ class TestScrapeArticle:
             "https://example.com/article", cookies=[], output_dir=str(tmp_path)
         )
         assert len(article.image_paths) == 1
-
-
-def _setup_playwright_mock(mock_pw):
-    mock_instance = AsyncMock()
-    mock_browser = AsyncMock()
-    mock_context = AsyncMock()
-    mock_page = AsyncMock()
-    mock_pw.return_value.__aenter__.return_value = mock_instance
-    mock_instance.chromium.launch.return_value = mock_browser
-    mock_browser.new_context.return_value = mock_context
-    mock_context.new_page.return_value = mock_page

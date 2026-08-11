@@ -1,17 +1,21 @@
 import argparse
 import asyncio
 import glob
+import json
 import logging
 import os
 import re
+from dataclasses import asdict
 from datetime import date
 from urllib.parse import urlparse
 
 from src.analyzer import analyze_article
 from src.config import get_config
 from src.llm import LLMClient
+from src.models import ImageAsset
 from src.script_writer import write_script
-from src.scraper import scrape_article
+from src.scraper import download_images as download_image_assets
+from src.scraper import extract_page_content, scrape_article
 from src.tts_generator import generate_tts
 from src.video_assembler import assemble_video
 
@@ -105,6 +109,69 @@ async def run(url: str, skip_video: bool = False) -> None:
     logger.info("Done! Video: %s", video_path)
 
 
+async def extract(url: str, output_dir: str = "") -> str:
+    config = get_config()
+    if not output_dir:
+        output_dir = os.path.join("output", str(date.today()), _article_slug(url))
+    os.makedirs(output_dir, exist_ok=True)
+    logger.info("Extracting page content: %s", url)
+
+    content = await extract_page_content(url, config["athletic_cookies"])
+    content_data = asdict(content)
+    with open(os.path.join(output_dir, "page.json"), "w", encoding="utf-8") as f:
+        json.dump(content_data, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(output_dir, "text.txt"), "w", encoding="utf-8") as f:
+        f.write(content.main_text)
+    with open(os.path.join(output_dir, "images.json"), "w", encoding="utf-8") as f:
+        json.dump(content_data["images"], f, ensure_ascii=False, indent=2)
+    with open(os.path.join(output_dir, "videos.json"), "w", encoding="utf-8") as f:
+        json.dump(content_data["videos"], f, ensure_ascii=False, indent=2)
+
+    logger.info(
+        "Extracted %d chars, %d images, %d videos",
+        len(content.main_text), len(content.images), len(content.videos),
+    )
+    logger.info("Extraction output: %s", output_dir)
+    return output_dir
+
+
+async def download_images_command(output_dir: str) -> str:
+    config = get_config()
+    page_path = os.path.join(output_dir, "page.json")
+    if not os.path.exists(page_path):
+        raise FileNotFoundError(f"Page manifest not found: {page_path}")
+
+    with open(page_path, encoding="utf-8") as f:
+        page_data = json.load(f)
+    images = [
+        ImageAsset(
+            url=item["url"],
+            alt=item.get("alt", ""),
+            caption=item.get("caption", ""),
+            credit=item.get("credit", ""),
+            width=item.get("width"),
+            height=item.get("height"),
+        )
+        for item in page_data.get("images", [])
+    ]
+    if not images:
+        raise ValueError(f"No images listed in page manifest: {page_path}")
+
+    records = await download_image_assets(
+        images,
+        output_dir,
+        referer=page_data.get("url", ""),
+        cookies=config["athletic_cookies"],
+    )
+    with open(os.path.join(output_dir, "images.json"), "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+
+    downloaded = sum(record["status"] == "downloaded" for record in records)
+    logger.info("Image download result: %d/%d succeeded", downloaded, len(records))
+    logger.info("Image output: %s", os.path.join(output_dir, "images"))
+    return output_dir
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate a Douyin short video from a The Athletic article"
@@ -119,6 +186,13 @@ def main() -> None:
     vid.add_argument("--dir", required=True, help="Output directory containing images/, audio.mp3, audio.vtt")
     vid.add_argument("--title", default="", help="Override title (reads title.txt if omitted)")
 
+    ext = sub.add_parser("extract", help="Extract article text, images, and videos")
+    ext.add_argument("--url", required=True, help="The Athletic article URL")
+    ext.add_argument("--dir", default="", help="Output directory (defaults to output/date/article-slug)")
+
+    dl = sub.add_parser("download-images", help="Download images from an extracted page manifest")
+    dl.add_argument("--dir", required=True, help="Directory containing page.json")
+
     # Backwards-compatible: no subcommand → treat as 'run'
     parser.add_argument("--url", help=argparse.SUPPRESS)
     parser.add_argument("--skip-video", action="store_true", help=argparse.SUPPRESS)
@@ -127,6 +201,10 @@ def main() -> None:
 
     if args.cmd == "video":
         run_video_only(args.dir, title=args.title)
+    elif args.cmd == "extract":
+        asyncio.run(extract(args.url, output_dir=args.dir))
+    elif args.cmd == "download-images":
+        asyncio.run(download_images_command(args.dir))
     else:
         if not args.url:
             parser.print_help()
