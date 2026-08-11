@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from src.analyzer import analyze_article
 from src.config import get_config
 from src.llm import LLMClient
-from src.models import ImageAsset
+from src.models import ImageAsset, ScrapedArticle
 from src.script_writer import write_script
 from src.scraper import download_images as download_image_assets
 from src.scraper import extract_page_content, scrape_article
@@ -172,6 +172,51 @@ async def download_images_command(output_dir: str) -> str:
     return output_dir
 
 
+async def generate_audio(output_dir: str) -> str:
+    config = get_config()
+    page_path = os.path.join(output_dir, "page.json")
+    if not os.path.exists(page_path):
+        raise FileNotFoundError(f"Page manifest not found: {page_path}")
+
+    with open(page_path, encoding="utf-8") as f:
+        page_data = json.load(f)
+
+    main_text = page_data.get("main_text", "").strip()
+    if not main_text:
+        raise ValueError(f"No article text found in page manifest: {page_path}")
+
+    article = ScrapedArticle(
+        title=page_data.get("title", "").strip(),
+        link=page_data.get("url", ""),
+        full_text=main_text,
+    )
+    llm = LLMClient(config["llm_base_url"], config["llm_api_key"], config["llm_model"])
+
+    logger.info("Step 2.1: Analyzing article with LLM...")
+    analyzed = analyze_article(article, llm)
+    with open(os.path.join(output_dir, "analysis.json"), "w", encoding="utf-8") as f:
+        json.dump(asdict(analyzed), f, ensure_ascii=False, indent=2)
+    with open(os.path.join(output_dir, "title.txt"), "w", encoding="utf-8") as f:
+        f.write(analyzed.title_cn)
+
+    logger.info("Step 2.2: Writing podcast script with LLM...")
+    today = date.today()
+    speech_date = f"{today.year}年{today.month}月{today.day}日"
+    script = write_script(analyzed, llm, date_str=speech_date)
+    with open(os.path.join(output_dir, "script.txt"), "w", encoding="utf-8") as f:
+        f.write(script.text)
+
+    logger.info("Step 2.3: Generating audio with edge-tts...")
+    mp3_path, vtt_path = await generate_tts(
+        script,
+        config["tts_voice"],
+        output_dir,
+        config["tts_rate"],
+    )
+    logger.info("Audio output: %s; subtitles: %s", mp3_path, vtt_path)
+    return output_dir
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate a Douyin short video from a The Athletic article"
@@ -193,6 +238,12 @@ def main() -> None:
     dl = sub.add_parser("download-images", help="Download images from an extracted page manifest")
     dl.add_argument("--dir", required=True, help="Directory containing page.json")
 
+    audio = sub.add_parser(
+        "generate-audio",
+        help="Analyze an extracted article and generate podcast audio",
+    )
+    audio.add_argument("--dir", required=True, help="Directory containing page.json")
+
     # Backwards-compatible: no subcommand → treat as 'run'
     parser.add_argument("--url", help=argparse.SUPPRESS)
     parser.add_argument("--skip-video", action="store_true", help=argparse.SUPPRESS)
@@ -205,6 +256,8 @@ def main() -> None:
         asyncio.run(extract(args.url, output_dir=args.dir))
     elif args.cmd == "download-images":
         asyncio.run(download_images_command(args.dir))
+    elif args.cmd == "generate-audio":
+        asyncio.run(generate_audio(args.dir))
     else:
         if not args.url:
             parser.print_help()

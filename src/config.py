@@ -19,5 +19,5 @@ def get_config() -> dict:
         "llm_api_key": os.environ.get("LLM_API_KEY", ""),
         "llm_model": os.environ.get("LLM_MODEL", "deepseek-v4-flash"),
         "tts_voice": os.environ.get("TTS_VOICE", "zh-CN-YunjianNeural"),
-        "tts_rate": os.environ.get("TTS_RATE", "+25%"),
+        "tts_rate": os.environ.get("TTS_RATE", "+10%"),
     }

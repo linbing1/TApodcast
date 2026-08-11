@@ -5,7 +5,7 @@
 ## 流程
 
 ```
-文章 URL → 抓取正文 & 图片 → LLM 分析 → 生成播报脚本 → TTS 配音 → ffmpeg 合成视频
+文章 URL → 提取正文/图片/视频 → 下载图片 → LLM 分析 → 生成播报脚本 → TTS 配音 → ffmpeg 合成视频
 ```
 
 ## 环境要求
@@ -32,7 +32,7 @@ playwright install chromium
 | `LLM_BASE_URL` | 否 | 默认 `https://open.bigmodel.cn/api/coding/paas/v4` |
 | `LLM_MODEL` | 否 | 默认 `glm-4.7` |
 | `TTS_VOICE` | 否 | 默认 `zh-CN-YunjianNeural`（男声） |
-| `TTS_RATE` | 否 | 语速，默认 `+40%` |
+| `TTS_RATE` | 否 | 语速，默认 `+10%`（约 1.1 倍） |
 
 ### 设置环境变量
 
@@ -78,6 +78,25 @@ videos.json    # 视频、iframe 或 JSON-LD 视频清单
 ```
 
 图片会保存到 `images/`，`images.json` 会记录每张图片的本地路径、下载状态和失败原因。
+
+### 第二步：分析正文并生成音频
+
+从第一步生成的 `page.json` 读取标题和正文，依次执行 LLM 分析、播报稿生成和 TTS：
+
+```bash
+.venv/bin/python main.py generate-audio \
+  --dir "output/YYYY-MM-DD/<article-slug>"
+```
+
+该步骤不处理图片、视频或 ffmpeg 合成，会生成：
+
+```text
+analysis.json   # LLM 结构化分析结果
+title.txt       # 中文标题
+script.txt      # 中文播报稿
+audio.mp3       # TTS 音频
+audio.vtt       # TTS 时间字幕
+```
 
 ## 输出示例
 

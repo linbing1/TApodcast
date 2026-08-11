@@ -21,7 +21,7 @@ class TestGetConfig:
             config = get_config()
         assert config["llm_model"] == "deepseek-v4-flash"
         assert config["tts_voice"] == "zh-CN-YunjianNeural"
-        assert config["tts_rate"] == "+25%"
+        assert config["tts_rate"] == "+10%"
 
     def test_invalid_cookies_json_defaults_to_empty_list(self):
         env = {"ATHLETIC_COOKIES": "not-json", "LLM_API_KEY": "sk-test"}
