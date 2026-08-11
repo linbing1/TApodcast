@@ -16,7 +16,6 @@ def _valid_response() -> str:
         "title_cn": "阿森纳胜利",
         "title_original": "Arsenal Win",
         "article_type": "赛后分析",
-        "importance": 4,
         "overview": "阿森纳在主场击败曼城。",
         "detail": "详细的比赛分析...",
         "key_people_and_data": "萨卡：2球",
@@ -32,7 +31,6 @@ class TestAnalyzeArticle:
         result = analyze_article(_make_scraped(), mock_llm)
         assert isinstance(result, AnalyzedArticle)
         assert result.title_cn == "阿森纳胜利"
-        assert result.importance == 4
 
     def test_passes_title_and_text_to_llm(self):
         mock_llm = MagicMock()

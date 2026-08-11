@@ -9,7 +9,6 @@ def _make_analyzed() -> AnalyzedArticle:
         title_cn="阿森纳胜利",
         title_original="Arsenal Win",
         article_type="赛后分析",
-        importance=4,
         overview="阿森纳在主场击败曼城。",
         detail="详细的比赛分析内容...",
         key_people_and_data="萨卡：2球",

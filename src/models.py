@@ -14,7 +14,6 @@ class AnalyzedArticle:
     title_cn: str
     title_original: str
     article_type: str
-    importance: int
     overview: str
     detail: str
     key_people_and_data: str

@@ -14,10 +14,9 @@ _SYSTEM_PROMPT = """你是一位资深英超足球记者和分析师。请对以
 核心原则：尽量保留原文的丰富内容，不要过度精简。读者希望通过你的分析获取接近原文的信息量，而不仅仅是摘要。
 
 返回一个 JSON 对象，包含：
-- title_cn: 中文标题翻译
+- title_cn: 中文标题翻译，不超过10个汉字，精炼概括核心事件
 - title_original: 英文原标题
 - article_type: 文章类型（深度分析/新闻报道/战术解读/转会动态/赛后分析）
-- importance: 重要性 1-5
 - overview: 3-5 句话概述核心论点，包含关键结论和背景（中文）
 - detail: 深度转述原文内容，要求：（1）保留原文中所有重要论据、数据、直接引语、战术细节和具体事例；（2）按原文逻辑结构组织，不要遗漏关键段落；（3）深度分析类 800-1200 字，普通新闻 400-600 字（中文）
 - key_people_and_data: 涉及的关键人物和数据，列出所有被提及的人名、具体数据和统计（中文）
@@ -25,75 +24,7 @@ _SYSTEM_PROMPT = """你是一位资深英超足球记者和分析师。请对以
 - link: 原文链接
 
 重要格式要求：
-- 仅返回 JSON 对象，不要添加任何其他文字
-- 所有字符串值内部禁止使用英文双引号 "，如需引用请使用『』或「」
-- 确保输出是合法的 JSON 格式"""
-
-
-def _escape_interior_quotes(text: str) -> str:
-    """Escape unescaped double quotes inside JSON string values using a state machine."""
-    out = []
-    in_string = False
-    containers: list[str] = []  # 'o' for object, 'a' for array
-    expect_key = False
-    i = 0
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if in_string:
-            if ch == "\\":
-                out.append(ch)
-                i += 1
-                if i < n:
-                    out.append(text[i])
-                    i += 1
-                continue
-            elif ch == '"':
-                j = i + 1
-                while j < n and text[j] in " \t\r\n":
-                    j += 1
-                if expect_key:
-                    if j < n and text[j] == ":":
-                        in_string = False
-                        expect_key = False
-                        out.append(ch)
-                    else:
-                        out.append('\\"')
-                else:
-                    if j >= n or text[j] in ",}]":
-                        in_string = False
-                        out.append(ch)
-                    else:
-                        out.append('\\"')
-            else:
-                out.append(ch)
-        else:
-            if ch == '"':
-                in_string = True
-                out.append(ch)
-            elif ch == "{":
-                containers.append("o")
-                expect_key = True
-                out.append(ch)
-            elif ch == "[":
-                containers.append("a")
-                expect_key = False
-                out.append(ch)
-            elif ch in "}]":
-                if containers:
-                    containers.pop()
-                expect_key = False
-                out.append(ch)
-            elif ch == ":":
-                expect_key = False
-                out.append(ch)
-            elif ch == ",":
-                expect_key = bool(containers and containers[-1] == "o")
-                out.append(ch)
-            else:
-                out.append(ch)
-        i += 1
-    return "".join(out)
+- 仅返回 JSON 对象，不要添加任何其他文字"""
 
 
 def _parse_response(response: str) -> dict:
@@ -104,11 +35,8 @@ def _parse_response(response: str) -> dict:
     text = text.strip()
     try:
         data = json.loads(text)
-    except json.JSONDecodeError:
-        try:
-            data = json.loads(_escape_interior_quotes(text))
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Failed to parse LLM response as JSON: {response[:200]}") from e
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse LLM response as JSON: {text[:200]}") from e
     if isinstance(data, list):
         data = data[0] if data else {}
     return data
@@ -116,7 +44,7 @@ def _parse_response(response: str) -> dict:
 
 def analyze_article(article: ScrapedArticle, llm: LLMClient) -> AnalyzedArticle:
     user_text = f"Title: {article.title}\nLink: {article.link}\nContent:\n{article.full_text}"
-    response = llm.complete(_SYSTEM_PROMPT, user_text)
+    response = llm.complete(_SYSTEM_PROMPT, user_text, json_mode=True)
     data = _parse_response(response)
     filtered = {k: v for k, v in data.items() if k in _ANALYZED_FIELDS}
     filtered.setdefault("link", article.link)

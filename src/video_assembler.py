@@ -2,7 +2,14 @@ import logging
 import os
 import subprocess
 
+from src.frame_renderer import render_frames
+
 logger = logging.getLogger(__name__)
+
+_VIDEO_W = 1080
+_VIDEO_H = 1920
+_TAIL_SECS = 2
+_PER_IMAGE = 5.0
 
 
 def get_audio_duration(mp3_path: str) -> float:
@@ -18,51 +25,66 @@ def get_audio_duration(mp3_path: str) -> float:
     return float(result.stdout.strip())
 
 
+def _image_top(img_path: str) -> int:
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0",
+            img_path,
+        ],
+        capture_output=True, text=True,
+    )
+    try:
+        w, h = map(int, result.stdout.strip().split(","))
+        scale = min(_VIDEO_W / w, _VIDEO_H / h)
+        scaled_h = int(h * scale)
+        return (_VIDEO_H - scaled_h) // 2
+    except Exception:
+        return 600
+
+
 def assemble_video(
     image_paths: list[str],
     mp3_path: str,
     srt_path: str,
     output_path: str,
+    title: str = "",
+    article_date: str = "",
 ) -> str:
+    _LEAD_IN = 1.0
     duration = get_audio_duration(mp3_path)
-    per_image = 4.0
+    total_duration = _LEAD_IN + duration + _TAIL_SECS
+    output_dir = os.path.dirname(output_path)
 
-    # Build cycled image list to cover the full audio duration
-    n = len(image_paths)
-    total_slots = max(1, int(duration / per_image) + 1)
-    cycled = [image_paths[i % n] for i in range(total_slots)]
+    img_top = _image_top(image_paths[0])
+    logger.info("Image top y=%d (video %dx%d)", img_top, _VIDEO_W, _VIDEO_H)
 
-    concat_path = os.path.join(os.path.dirname(output_path), "concat.txt")
-    with open(concat_path, "w") as f:
-        for path in cycled:
-            f.write(f"file '{os.path.abspath(path)}'\n")
-            f.write(f"duration {per_image:.3f}\n")
-        f.write(f"file '{os.path.abspath(cycled[-1])}'\n")
-
-    # Scale image to fit 1080x1920 with black letterbox; burn subtitles if libass is available
-    abs_srt = os.path.abspath(srt_path)
-    letterbox = (
-        "scale=1080:1920:force_original_aspect_ratio=decrease,"
-        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+    logger.info("Rendering frames with Pillow (blurred background + subtitles)...")
+    frames_dir, fps = render_frames(
+        image_paths=image_paths,
+        duration=total_duration,
+        per_image=_PER_IMAGE,
+        srt_path=srt_path,
+        title=title,
+        article_date=article_date,
+        output_dir=output_dir,
+        img_top=img_top,
+        lead_in=_LEAD_IN,
     )
-    has_libass = "subtitles" in subprocess.run(
-        ["ffmpeg", "-filters"], capture_output=True, text=True
-    ).stdout
-    if has_libass:
-        force_style = "FontSize=22\\,PrimaryColour=&Hffffff\\,OutlineColour=&H000000\\,Outline=2\\,Alignment=2"
-        vf = f"{letterbox},subtitles='{abs_srt}':force_style={force_style}"
-    else:
-        logger.warning("libass not available — producing video without burned subtitles")
-        vf = letterbox
 
+    adelay_ms = int(_LEAD_IN * 1000)
     cmd = [
         "ffmpeg", "-y",
-        "-f", "concat", "-safe", "0", "-i", concat_path,
+        "-framerate", str(fps),
+        "-i", os.path.join(frames_dir, "%05d.jpg"),
         "-i", mp3_path,
-        "-vf", vf,
+        "-r", "30",
         "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-shortest",
+        "-b:v", "4M", "-b:a", "192k", "-c:a", "aac",
+        "-af", f"adelay={adelay_ms}:all=1",
+        "-t", f"{total_duration:.3f}",
         output_path,
     ]
 

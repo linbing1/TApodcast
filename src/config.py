@@ -15,11 +15,9 @@ def get_config() -> dict:
 
     return {
         "athletic_cookies": cookies,
-        "llm_base_url": os.environ.get(
-            "LLM_BASE_URL", "https://open.bigmodel.cn/api/coding/paas/v4"
-        ),
+        "llm_base_url": os.environ.get("LLM_BASE_URL", "https://api.deepseek.com/v1"),
         "llm_api_key": os.environ.get("LLM_API_KEY", ""),
-        "llm_model": os.environ.get("LLM_MODEL", "glm-4.7"),
+        "llm_model": os.environ.get("LLM_MODEL", "deepseek-v4-flash"),
         "tts_voice": os.environ.get("TTS_VOICE", "zh-CN-YunjianNeural"),
-        "tts_rate": os.environ.get("TTS_RATE", "+40%"),
+        "tts_rate": os.environ.get("TTS_RATE", "+25%"),
     }

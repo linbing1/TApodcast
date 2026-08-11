@@ -18,10 +18,10 @@ class TestAnalyzedArticle:
     def test_instantiation(self):
         a = AnalyzedArticle(
             title_cn="标题", title_original="Title", article_type="新闻报道",
-            importance=4, overview="概述", detail="详情",
+            overview="概述", detail="详情",
             key_people_and_data="萨卡", impact="影响", link="https://example.com"
         )
-        assert a.importance == 4
+        assert a.title_cn == "标题"
 
 
 class TestPodcastScript:
