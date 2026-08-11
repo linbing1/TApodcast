@@ -236,6 +236,17 @@ def _merge_images(*image_groups: list[ImageAsset]) -> list[ImageAsset]:
     return images
 
 
+def _find_cover_image_index(images: list[ImageAsset], cover_url: str) -> int | None:
+    if not images:
+        return None
+    if cover_url:
+        cover_key = _image_key(cover_url)
+        for index, image in enumerate(images):
+            if _image_key(image.url) == cover_key:
+                return index
+    return 0
+
+
 async def _extract_page_content_data(page: Page, url: str) -> PageContent:
     await page.goto(url, wait_until="domcontentloaded", timeout=120000)
 
@@ -290,10 +301,10 @@ async def _extract_page_content_data(page: Page, url: str) -> PageContent:
         )
     )
 
-    media: dict[str, list[dict[str, Any]]] = await page.evaluate(
+    media: dict[str, Any] = await page.evaluate(
         """(selector) => {
             const container = document.querySelector(selector);
-            if (!container) return {images: [], videos: []};
+            if (!container) return {images: [], videos: [], coverImageUrl: ""};
             const mediaRoots = [container];
             const featuredContainer = document.querySelector('[class*="FeaturedImageContainer"]');
             if (featuredContainer && featuredContainer !== container) mediaRoots.push(featuredContainer);
@@ -302,6 +313,16 @@ async def _extract_page_content_data(page: Page, url: str) -> PageContent:
             const seenVideos = new Set();
             const images = [];
             const videos = [];
+            const headings = Array.from(document.querySelectorAll(
+                'h1, [role="heading"][aria-level="1"], [class*="Headline"], [class*="headline"]'
+            ));
+            const heading = headings.find((candidate) => {
+                const rect = candidate.getBoundingClientRect();
+                return candidate.textContent.trim() && rect.width > 0 && rect.height > 0;
+            });
+            const headingRect = heading ? heading.getBoundingClientRect() : null;
+            const headingTop = headingRect ? headingRect.top + window.scrollY : null;
+            const headingBottom = headingRect ? headingRect.bottom + window.scrollY : null;
             const absoluteUrl = (value) => {
                 if (!value) return "";
                 try { return new URL(value, document.baseURI).href; }
@@ -338,12 +359,27 @@ async def _extract_page_content_data(page: Page, url: str) -> PageContent:
                     if (videoPosterUrls.has(absolute) || videoHostRe.test(absolute) || skipPathRe.test(absolute)) continue;
                     const w = img.naturalWidth || parseInt(img.getAttribute('width') || '0');
                     if (w === 0 || w >= 300) {
+                        const rect = img.getBoundingClientRect();
+                        const imageTop = rect.top + window.scrollY;
+                        const imageBottom = rect.bottom + window.scrollY;
+                        let headingDistance = imageTop;
+                        if (headingTop !== null && headingBottom !== null) {
+                            if (imageBottom <= headingTop) {
+                                headingDistance = headingTop - imageBottom;
+                            } else if (imageTop >= headingBottom) {
+                                headingDistance = imageTop - headingBottom;
+                            } else {
+                                headingDistance = 0;
+                            }
+                        }
                         seenImages.add(absolute);
                         images.push({
                             url: absolute,
                             alt: img.getAttribute('alt') || '',
                             width: w || null,
                             height: img.naturalHeight || parseInt(img.getAttribute('height') || '0') || null,
+                            headingDistance,
+                            imageTop,
                         });
                         break;
                     }
@@ -416,9 +452,16 @@ async def _extract_page_content_data(page: Page, url: str) -> PageContent:
                 } catch (_) {}
             }
 
+            const rankedImages = images.slice().sort((left, right) => {
+                if (left.headingDistance !== right.headingDistance) {
+                    return left.headingDistance - right.headingDistance;
+                }
+                return left.imageTop - right.imageTop;
+            });
+            const coverImageUrl = rankedImages[0]?.url || images[0]?.url || '';
             const jsonLd = Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
                 .map((script) => script.textContent || '');
-            return {images, videos, jsonLd};
+            return {images, videos, jsonLd, coverImageUrl};
         }""",
         matched_selector,
     )
@@ -434,6 +477,8 @@ async def _extract_page_content_data(page: Page, url: str) -> PageContent:
     ]
     jsonld_images = _extract_jsonld_images(media.get("jsonLd", []), url)
     images = _merge_images(jsonld_images, dom_images)
+    cover_image_url = media.get("coverImageUrl", "")
+    cover_image_index = _find_cover_image_index(images, cover_image_url)
     videos = [
         VideoAsset(
             url=item["url"],
@@ -447,7 +492,15 @@ async def _extract_page_content_data(page: Page, url: str) -> PageContent:
         for item in media.get("videos", [])
         if item.get("url")
     ]
-    return PageContent(url=url, title=title.strip(), main_text=text, images=images, videos=videos)
+    return PageContent(
+        url=url,
+        title=title.strip(),
+        main_text=text,
+        images=images,
+        videos=videos,
+        cover_image_index=cover_image_index,
+        cover_image_url=cover_image_url,
+    )
 
 
 async def extract_page_content(url: str, cookies: list[dict]) -> PageContent:
@@ -519,6 +572,7 @@ async def download_images(
     output_dir: str,
     referer: str = "",
     cookies: list[dict] | None = None,
+    cover_image_index: int | None = None,
 ) -> list[dict[str, Any]]:
     images_dir = os.path.join(output_dir, "images")
     if os.path.exists(images_dir):
@@ -547,6 +601,7 @@ async def download_images(
                 "credit": image.credit,
                 "width": image.width,
                 "height": image.height,
+                "is_cover": index == cover_image_index,
             }
             return record
 
@@ -567,7 +622,13 @@ async def scrape_article(url: str, cookies: list[dict], output_dir: str) -> Scra
     if not content.images:
         raise ValueError(f"No images found in article: {url}")
 
-    records = await download_images(content.images, output_dir, referer=url, cookies=cookies)
+    records = await download_images(
+        content.images,
+        output_dir,
+        referer=url,
+        cookies=cookies,
+        cover_image_index=content.cover_image_index,
+    )
     image_paths = [
         os.path.join(output_dir, record["local_path"])
         for record in records
@@ -577,4 +638,30 @@ async def scrape_article(url: str, cookies: list[dict], output_dir: str) -> Scra
     if not image_paths:
         raise ValueError(f"Failed to download any images for: {url}")
 
-    return ScrapedArticle(title=title, link=url, full_text=full_text, image_paths=image_paths)
+    cover_image_path = None
+    if content.cover_image_index is not None and content.cover_image_index < len(records):
+        cover_record = records[content.cover_image_index]
+        if cover_record["status"] == "downloaded":
+            cover_image_path = os.path.join(output_dir, cover_record["local_path"])
+    with open(os.path.join(output_dir, "cover.json"), "w", encoding="utf-8") as cover_file:
+        json.dump(
+            {
+                "image_index": content.cover_image_index,
+                "image_url": content.cover_image_url,
+                "local_path": (
+                    os.path.relpath(cover_image_path, output_dir)
+                    if cover_image_path else None
+                ),
+            },
+            cover_file,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    return ScrapedArticle(
+        title=title,
+        link=url,
+        full_text=full_text,
+        image_paths=image_paths,
+        cover_image_path=cover_image_path,
+    )

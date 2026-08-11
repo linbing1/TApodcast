@@ -67,7 +67,7 @@ def run_video_only(output_dir: str, title: str = "") -> None:
 def run_cover_only(
     output_dir: str,
     title: str = "",
-    image_index: int = 0,
+    image_index: int | None = None,
     kicker: str = "英超新闻 · 深度报道",
     subtitle: str = "",
     output_name: str = "cover.png",
@@ -184,6 +184,7 @@ async def download_images_command(output_dir: str) -> str:
         output_dir,
         referer=page_data.get("url", ""),
         cookies=config["athletic_cookies"],
+        cover_image_index=page_data.get("cover_image_index"),
     )
     with open(os.path.join(output_dir, "images.json"), "w", encoding="utf-8") as f:
         json.dump(records, f, ensure_ascii=False, indent=2)
@@ -256,7 +257,7 @@ def main() -> None:
     cover = sub.add_parser("cover", help="Generate a Douyin cover from existing images")
     cover.add_argument("--dir", required=True, help="Output directory containing images/")
     cover.add_argument("--title", default="", help="Cover title (reads title.txt if omitted)")
-    cover.add_argument("--image-index", type=int, default=0, help="Image index to use as the cover background")
+    cover.add_argument("--image-index", type=int, default=None, help="Override the image index selected during extraction")
     cover.add_argument("--kicker", default="英超新闻 · 深度报道", help="Small label above the title")
     cover.add_argument("--subtitle", default="", help="Optional supporting line below the title")
     cover.add_argument("--output", default="cover.png", help="Output filename inside --dir")

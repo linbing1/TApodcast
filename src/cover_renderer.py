@@ -1,5 +1,5 @@
+import json
 import logging
-import os
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -141,7 +141,7 @@ def render_cover(
 def generate_cover(
     output_dir: str,
     title: str = "",
-    image_index: int = 0,
+    image_index: int | None = None,
     kicker: str = "英超新闻 · 深度报道",
     subtitle: str = "",
     brand: str = "英超每日观察",
@@ -154,8 +154,29 @@ def generate_cover(
     ) if image_dir.exists() else []
     if not image_paths:
         raise FileNotFoundError(f"No images found in {image_dir}")
-    if image_index < 0 or image_index >= len(image_paths):
+
+    if image_index is None:
+        metadata_paths = [Path(output_dir) / "page.json", Path(output_dir) / "cover.json"]
+        for metadata_path in metadata_paths:
+            if not metadata_path.exists():
+                continue
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata.get("cover_image_index") is not None:
+                image_index = int(metadata["cover_image_index"])
+                break
+            if metadata.get("image_index") is not None:
+                image_index = int(metadata["image_index"])
+                break
+        if image_index is None:
+            image_index = 0
+
+    indexed_path = image_dir / f"{image_index:03d}.jpg"
+    if indexed_path.exists():
+        image_path = indexed_path
+    elif image_index < 0 or image_index >= len(image_paths):
         raise IndexError(f"Image index {image_index} is out of range for {image_dir}")
+    else:
+        image_path = image_paths[image_index]
 
     if not title:
         title_path = Path(output_dir) / "title.txt"
@@ -165,7 +186,7 @@ def generate_cover(
         raise ValueError(f"No cover title found in {output_dir}")
 
     return render_cover(
-        image_path=str(image_paths[image_index]),
+        image_path=str(image_path),
         title=title,
         output_path=str(Path(output_dir) / output_name),
         kicker=kicker,

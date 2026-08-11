@@ -68,6 +68,8 @@ images.json    # 图片 URL、尺寸和 alt 文本
 videos.json    # 视频、iframe 或 JSON-LD 视频清单
 ```
 
+`page.json` 同时记录 `cover_image_index` 和 `cover_image_url`：解析器会根据标题附近图片的页面位置确定封面候选。下载后的 `images.json` 会在对应记录中写入 `is_cover: true`。
+
 ### 下载图片
 
 从已经生成的 `page.json` 下载并校验文章图片：
@@ -120,7 +122,7 @@ audio.vtt       # TTS 时间字幕
 
 ### 第四步：生成抖音封面
 
-封面独立于视频生成，默认读取 `title.txt`，从 `images/` 选择一张图片并生成 `1080×1920` 的 `cover.png`：
+封面独立于视频生成，默认读取 `title.txt` 和第一步解析得到的封面候选，从 `images/` 生成 `1080×1920` 的 `cover.png`：
 
 ```bash
 .venv/bin/python main.py cover \
@@ -141,7 +143,7 @@ audio.vtt       # TTS 时间字幕
 
 可用参数：
 
-- `--image-index`：封面背景图索引，从 `0` 开始；
+- `--image-index`：覆盖第一步选定的封面背景图索引，从 `0` 开始；省略时使用解析阶段的候选图；
 - `--title`：主标题，省略时读取 `title.txt`；
 - `--kicker`：标题上方的小标签；
 - `--subtitle`：标题下方的辅助说明，可省略；

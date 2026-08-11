@@ -110,6 +110,7 @@ async def test_download_images_returns_local_manifest(
         str(tmp_path),
         referer="https://example.com/article",
         cookies=[{"name": "sid", "value": "abc"}],
+        cover_image_index=0,
     )
 
     assert records == [{
@@ -122,6 +123,7 @@ async def test_download_images_returns_local_manifest(
         "credit": "",
         "width": None,
         "height": None,
+        "is_cover": True,
     }]
     headers = mock_client.get.call_args.kwargs["headers"]
     assert headers["Referer"] == "https://example.com/article"
@@ -142,6 +144,8 @@ class TestScrapeArticle:
                 ImageAsset(url="https://cdn.example.com/img1.jpg"),
                 ImageAsset(url="https://cdn.example.com/img2.jpg"),
             ],
+            cover_image_index=1,
+            cover_image_url="https://cdn.example.com/img2.jpg",
         )
         mock_client = AsyncMock()
         mock_httpx_cls.return_value.__aenter__.return_value = mock_client
@@ -158,6 +162,10 @@ class TestScrapeArticle:
         assert article.full_text == "Arsenal vs City match report"
         assert article.title == "Arsenal Win"
         assert len(article.image_paths) == 2
+        assert article.cover_image_path == str(tmp_path / "images/001.jpg")
+        cover_metadata = (tmp_path / "cover.json").read_text(encoding="utf-8")
+        assert '"image_index": 1' in cover_metadata
+        assert '"local_path": "images/001.jpg"' in cover_metadata
 
     @pytest.mark.asyncio
     @patch("src.scraper.extract_page_content", new_callable=AsyncMock)

@@ -11,6 +11,10 @@ def test_generate_cover_reads_title_and_writes_vertical_png(tmp_path, monkeypatc
     Image.new("RGB", (1200, 800), "#164d75").save(image_dir / "000.jpg")
     Image.new("RGB", (800, 1200), "#875522").save(image_dir / "001.jpg")
     (tmp_path / "title.txt").write_text("枪手签下领袖吉马良斯", encoding="utf-8")
+    (tmp_path / "page.json").write_text(
+        '{"cover_image_index": 1, "cover_image_url": "https://example.com/001.jpg"}',
+        encoding="utf-8",
+    )
 
     font = ImageFontForTest()
     monkeypatch.setattr(cover_renderer, "find_cjk_font", lambda: str(font.path))
@@ -18,7 +22,6 @@ def test_generate_cover_reads_title_and_writes_vertical_png(tmp_path, monkeypatc
 
     output = cover_renderer.generate_cover(
         str(tmp_path),
-        image_index=1,
         kicker="转会专题",
         subtitle="一笔重磅转会背后的故事",
     )

@@ -29,6 +29,8 @@ class PageContent:
     main_text: str
     images: list[ImageAsset] = field(default_factory=list)
     videos: list[VideoAsset] = field(default_factory=list)
+    cover_image_index: int | None = None
+    cover_image_url: str = ""
 
 
 @dataclass
@@ -37,6 +39,7 @@ class ScrapedArticle:
     link: str
     full_text: str
     image_paths: list[str] = field(default_factory=list)
+    cover_image_path: str | None = None
 
 
 @dataclass
