@@ -11,7 +11,7 @@
 ## 环境要求
 
 - Python 3.12
-- ffmpeg（`brew install ffmpeg`）
+- 支持 `libass` 的 ffmpeg-full（`brew install ffmpeg-full`）
 - Playwright Chromium（`playwright install chromium`）
 
 ## 安装
@@ -49,7 +49,7 @@ Cookie 导出推荐使用 [Cookie-Editor](https://cookie-editor.com/) 浏览器�
 .venv/bin/python main.py --url "https://www.nytimes.com/athletic/ARTICLE_ID/..."
 ```
 
-输出文件保存在 `output/YYYY-MM-DD/<article-slug>/video.mp4`。
+输出文件保存在 `output/YYYY-MM-DD/<article-slug>/`。
 
 ### 只解析网页内容
 
@@ -98,6 +98,26 @@ audio.mp3       # TTS 音频
 audio.vtt       # TTS 时间字幕
 ```
 
+### 第三步：生成抖音竖屏视频
+
+从已经下载的图片、音频和 `audio.vtt` 生成固定规格的视频：
+
+```bash
+.venv/bin/python main.py video \
+  --dir "output/YYYY-MM-DD/<article-slug>"
+```
+
+当前视频流程固定为：
+
+- 输出 `1080×1920`、`30fps` 的 `9:16` 竖屏视频；
+- 图片保持比例，横向图片在纯黑画布上尽量铺满宽度并垂直居中；
+- 图片按每张约 5 秒轮播，视频时长与 `audio.mp3` 对齐；
+- 暂不处理视频素材、渐变、模糊背景、标题或图片说明；
+- 使用 `audio.vtt` 生成 `subtitles.ass`，再由带 `libass` 的 FFmpeg 烧录黄色、黑色描边字幕；
+- 字幕最多两行，左右边距 50，底部边距 380，直接与音频时间轴对齐。
+
+如果系统中有多个 ffmpeg，可通过 `FFMPEG_BIN` 指定带 `ass` 和 `subtitles` 滤镜的可执行文件；中文字幕字体可通过 `CJK_FONT_PATH` 指定。
+
 ## 输出示例
 
 ```
@@ -107,8 +127,8 @@ output/
         ├── images/          # 从文章下载的图片
         ├── audio.mp3        # TTS 生成的音频
         ├── audio.vtt        # 字幕文件
-        ├── concat.txt       # ffmpeg 图片序列
-        └── video.mp4        # 最终视频（1080×1920，约 2 分钟）
+        ├── subtitles.ass    # FFmpeg/libass 使用的烧录字幕
+        └── video.mp4        # 最终视频（1080×1920，9:16）
 ```
 
 ## 运行测试

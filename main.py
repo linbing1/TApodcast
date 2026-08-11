@@ -70,19 +70,19 @@ async def run(url: str, skip_video: bool = False) -> None:
     os.makedirs(output_dir, exist_ok=True)
     logger.info("Output directory: %s", output_dir)
 
-    logger.info("Step 1: Scraping article and images...")
+    logger.info("Step 1: Extracting article content and downloading images...")
     article = await scrape_article(url, config["athletic_cookies"], output_dir)
     logger.info("Scraped %d chars text, %d images", len(article.full_text), len(article.image_paths))
 
     llm = LLMClient(config["llm_base_url"], config["llm_api_key"], config["llm_model"])
 
-    logger.info("Step 2: Analyzing article (LLM)...")
+    logger.info("Step 2.1: Analyzing article with LLM...")
     analyzed = analyze_article(article, llm)
     logger.info("Analysis complete: %s", analyzed.title_cn)
     with open(os.path.join(output_dir, "title.txt"), "w", encoding="utf-8") as f:
         f.write(analyzed.title_cn)
 
-    logger.info("Step 3: Writing podcast script (LLM)...")
+    logger.info("Step 2.2: Writing podcast script with LLM...")
     today = date.today()
     speech_date = f"{today.year}年{today.month}月{today.day}日"
     script = write_script(analyzed, llm, date_str=speech_date)
@@ -93,14 +93,14 @@ async def run(url: str, skip_video: bool = False) -> None:
         f.write(script.text)
     logger.info("Script saved to %s", script_path)
 
-    logger.info("Step 4: Generating audio with edge-tts...")
+    logger.info("Step 2.3: Generating audio and VTT subtitles with edge-tts...")
     mp3_path, srt_path = await generate_tts(script, config["tts_voice"], output_dir, config["tts_rate"])
 
     if skip_video:
         logger.info("--skip-video: done. Output: %s", output_dir)
         return
 
-    logger.info("Step 5: Assembling video with ffmpeg...")
+    logger.info("Step 3: Assembling the vertical video with burned-in subtitles...")
     video_path = os.path.join(output_dir, f"{_safe_title(analyzed.title_cn)}.mp4")
     article_date = date.today().strftime("%Y年%m月%d日")
     assemble_video(article.image_paths, mp3_path, srt_path, video_path,

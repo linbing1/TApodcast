@@ -1,42 +1,28 @@
 from PIL import Image
 
-from src.frame_renderer import _composite, _parse_subtitles, render_frames
+from src.frame_renderer import _composite, render_frames
 
 
-def test_composite_returns_vertical_canvas():
+def test_composite_returns_black_vertical_canvas_with_centered_image():
     image = Image.new("RGB", (800, 600), color="red")
 
     result = _composite(image)
 
     assert result.size == (1080, 1920)
+    assert result.getpixel((0, 0)) == (0, 0, 0)
+    assert result.getpixel((1079, 1919)) == (0, 0, 0)
+    assert result.getpixel((540, 960))[0] > 200
 
 
-def test_parse_subtitles_reads_timestamped_entries(tmp_path):
-    subtitle_path = tmp_path / "audio.vtt"
-    subtitle_path.write_text(
-        "1\n00:00:00,100 --> 00:00:01,200\nhello <b>world</b>\n\n",
-        encoding="utf-8",
-    )
-
-    result = _parse_subtitles(str(subtitle_path))
-
-    assert result == [(0.1, 1.2, "hello world")]
-
-
-def test_render_frames_creates_numbered_jpegs(tmp_path):
+def test_render_frames_creates_numbered_jpegs_without_text_overlay(tmp_path):
     image_path = tmp_path / "image.jpg"
     Image.new("RGB", (800, 600), color="blue").save(image_path)
-    subtitle_path = tmp_path / "audio.vtt"
-    subtitle_path.write_text(
-        "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n",
-        encoding="utf-8",
-    )
 
     frames_dir, fps = render_frames(
         image_paths=[str(image_path)],
         duration=0.4,
         per_image=1.0,
-        srt_path=str(subtitle_path),
+        srt_path=str(tmp_path / "audio.vtt"),
         title="Title",
         article_date="2026-08-11",
         output_dir=str(tmp_path),
@@ -49,4 +35,7 @@ def test_render_frames_creates_numbered_jpegs(tmp_path):
     assert [path.name for path in frame_paths] == [
         "00000.jpg", "00001.jpg", "00002.jpg"
     ]
-    assert Image.open(frame_paths[0]).size == (1080, 1920)
+
+    frame = Image.open(frame_paths[0])
+    assert frame.size == (1080, 1920)
+    assert frame.getpixel((0, 0)) == (0, 0, 0)
