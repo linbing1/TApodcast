@@ -1,8 +1,13 @@
+from datetime import date
 from pathlib import Path
 
 from PIL import Image
 
 from src import cover_renderer
+
+
+def test_format_cover_date():
+    assert cover_renderer._format_cover_date(date(2026, 8, 11)) == "2026.08.11"
 
 
 def test_generate_cover_reads_title_and_writes_vertical_png(tmp_path, monkeypatch):

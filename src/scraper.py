@@ -247,6 +247,25 @@ def _find_cover_image_index(images: list[ImageAsset], cover_url: str) -> int | N
     return 0
 
 
+def _select_cover_image(
+    images: list[ImageAsset],
+    metadata_url: str,
+    positional_url: str,
+) -> tuple[int | None, str]:
+    if not images:
+        return None, ""
+
+    for candidate in (metadata_url, positional_url):
+        if not candidate:
+            continue
+        candidate_key = _image_key(candidate)
+        for index, image in enumerate(images):
+            if _image_key(image.url) == candidate_key:
+                return index, candidate
+
+    return 0, images[0].url
+
+
 async def _extract_page_content_data(page: Page, url: str) -> PageContent:
     await page.goto(url, wait_until="domcontentloaded", timeout=120000)
 
@@ -328,6 +347,10 @@ async def _extract_page_content_data(page: Page, url: str) -> PageContent:
                 try { return new URL(value, document.baseURI).href; }
                 catch (_) { return ""; }
             };
+            const metadataCoverImageUrl = absoluteUrl(
+                document.querySelector('meta[property="og:image"]')?.getAttribute('content') ||
+                document.querySelector('meta[name="twitter:image"]')?.getAttribute('content')
+            );
             const addVideo = (video) => {
                 if (!video.url || seenVideos.has(video.url)) return;
                 seenVideos.add(video.url);
@@ -458,10 +481,10 @@ async def _extract_page_content_data(page: Page, url: str) -> PageContent:
                 }
                 return left.imageTop - right.imageTop;
             });
-            const coverImageUrl = rankedImages[0]?.url || images[0]?.url || '';
+            const positionCoverImageUrl = rankedImages[0]?.url || images[0]?.url || '';
             const jsonLd = Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
                 .map((script) => script.textContent || '');
-            return {images, videos, jsonLd, coverImageUrl};
+            return {images, videos, jsonLd, metadataCoverImageUrl, positionCoverImageUrl};
         }""",
         matched_selector,
     )
@@ -477,8 +500,11 @@ async def _extract_page_content_data(page: Page, url: str) -> PageContent:
     ]
     jsonld_images = _extract_jsonld_images(media.get("jsonLd", []), url)
     images = _merge_images(jsonld_images, dom_images)
-    cover_image_url = media.get("coverImageUrl", "")
-    cover_image_index = _find_cover_image_index(images, cover_image_url)
+    cover_image_index, cover_image_url = _select_cover_image(
+        images,
+        media.get("metadataCoverImageUrl", ""),
+        media.get("positionCoverImageUrl", ""),
+    )
     videos = [
         VideoAsset(
             url=item["url"],

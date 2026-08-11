@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+from datetime import date
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -29,9 +31,26 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.truetype(font_path, size)
 
 
+def _load_date_font(size: int) -> ImageFont.FreeTypeFont:
+    candidates = [
+        os.getenv("COVER_DATE_FONT_PATH", ""),
+        "/System/Library/Fonts/Supplemental/DIN Condensed Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Narrow Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return ImageFont.truetype(candidate, size)
+    return _load_font(size)
+
+
 def _text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont) -> int:
     bounds = draw.textbbox((0, 0), text, font=font)
     return bounds[2] - bounds[0]
+
+
+def _format_cover_date(value: date | None = None) -> str:
+    return (value or date.today()).strftime("%Y.%m.%d")
 
 
 def _split_title(
@@ -69,14 +88,23 @@ def _draw_cover_text(
     kicker: str,
     subtitle: str,
     brand: str,
+    date_text: str,
 ) -> None:
     draw = ImageDraw.Draw(canvas)
     title_font = _load_font(96)
     kicker_font = _load_font(34)
+    date_font = _load_date_font(60)
     meta_font = _load_font(28)
     title_lines = _split_title(title, draw, title_font)
 
-    draw.text((LEFT_MARGIN, 150), kicker, font=kicker_font, fill=ACCENT)
+    kicker_position = (LEFT_MARGIN, 150)
+    draw.text(kicker_position, kicker, font=kicker_font, fill=ACCENT)
+    kicker_bounds = draw.textbbox(kicker_position, kicker, font=kicker_font)
+    date_bounds = draw.textbbox((0, 0), date_text, font=date_font)
+    date_width = date_bounds[2] - date_bounds[0]
+    date_x = COVER_WIDTH - LEFT_MARGIN - date_width - date_bounds[0]
+    date_y = kicker_bounds[1] - date_bounds[1]
+    draw.text((date_x, date_y), date_text, font=date_font, fill=ACCENT)
     draw.rounded_rectangle(
         (LEFT_MARGIN, 215, LEFT_MARGIN + 110, 223),
         radius=4,
@@ -112,6 +140,7 @@ def render_cover(
     kicker: str = "英超新闻 · 深度报道",
     subtitle: str = "",
     brand: str = "英超每日观察",
+    date_text: str = "",
 ) -> str:
     source = Image.open(image_path).convert("RGB")
     photo = ImageOps.fit(
@@ -130,7 +159,14 @@ def render_cover(
         overlay_draw.line((0, y, COVER_WIDTH, y), fill=(0, 0, 0, strength))
     canvas.alpha_composite(overlay, (0, PHOTO_TOP))
 
-    _draw_cover_text(canvas, title, kicker, subtitle, brand)
+    _draw_cover_text(
+        canvas,
+        title,
+        kicker,
+        subtitle,
+        brand,
+        date_text or _format_cover_date(),
+    )
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     canvas.convert("RGB").save(output, "PNG", optimize=True)
@@ -145,6 +181,7 @@ def generate_cover(
     kicker: str = "英超新闻 · 深度报道",
     subtitle: str = "",
     brand: str = "英超每日观察",
+    date_text: str = "",
     output_name: str = "cover.png",
 ) -> str:
     image_dir = Path(output_dir) / "images"
@@ -192,4 +229,5 @@ def generate_cover(
         kicker=kicker,
         subtitle=subtitle,
         brand=brand,
+        date_text=date_text,
     )

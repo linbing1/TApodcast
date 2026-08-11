@@ -8,6 +8,7 @@ from src.scraper import (
     _clean_main_text,
     _extract_jsonld_images,
     _merge_images,
+    _select_cover_image,
     download_images,
     scrape_article,
 )
@@ -89,6 +90,32 @@ def test_merge_images_prefers_jsonld_order_and_enriches_metadata():
         width=800,
         height=450,
     )]
+
+
+def test_select_cover_image_prefers_metadata_over_positional_match():
+    images = [
+        ImageAsset(url="https://cdn.example.com/lead.jpg?width=1200&height=675"),
+        ImageAsset(url="https://cdn.example.com/body.jpg"),
+    ]
+
+    assert _select_cover_image(
+        images,
+        "https://cdn.example.com/lead.jpg?width=1080&height=630&fit=cover",
+        "https://cdn.example.com/body.jpg",
+    ) == (0, "https://cdn.example.com/lead.jpg?width=1080&height=630&fit=cover")
+
+
+def test_select_cover_image_falls_back_to_positional_match():
+    images = [
+        ImageAsset(url="https://cdn.example.com/lead.jpg"),
+        ImageAsset(url="https://cdn.example.com/body.jpg"),
+    ]
+
+    assert _select_cover_image(
+        images,
+        "https://cdn.example.com/missing.jpg",
+        "https://cdn.example.com/body.jpg",
+    ) == (1, "https://cdn.example.com/body.jpg")
 
 
 @pytest.mark.asyncio
