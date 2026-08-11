@@ -11,8 +11,8 @@ FONT_NAME = "Noto Sans CJK SC"
 FONT_SIZE = 62
 MARGIN_LEFT = 50
 MARGIN_RIGHT = 50
-MARGIN_BOTTOM = 380
-MAX_LINE_WIDTH = 18.0
+SUBTITLE_CENTER_Y = 1480
+MAX_LINE_WIDTH = 24.0
 
 _CJK_FONT_CANDIDATES = (
     "~/Library/Fonts/NotoSansCJKsc-Regular.otf",
@@ -145,23 +145,65 @@ def _hard_wrap(text: str, max_width: float, protected: dict[str, str]) -> list[s
     return lines
 
 
-def _wrapped_lines(text: str, max_width: float) -> list[str]:
+def _semantic_pieces(text: str, max_width: float) -> list[str]:
     protected_text, protected = _protect_tokens(text.strip())
     segments = [segment.strip() for segment in _PUNCTUATION_RE.split(protected_text) if segment.strip()]
-    lines: list[str] = []
+    pieces: list[str] = []
     for segment in segments:
-        lines.extend(_hard_wrap(segment, max_width, protected))
-    return [_restore_tokens(line, protected) for line in lines]
+        pieces.extend(_hard_wrap(segment, max_width, protected))
+    return [_restore_tokens(piece, protected) for piece in pieces]
+
+
+def _joined_width(pieces: list[str]) -> float:
+    return _display_width("".join(pieces))
+
+
+def _best_line_split(pieces: list[str], max_width: float) -> int | None:
+    candidates: list[tuple[float, float, int]] = []
+    for split_index in range(1, len(pieces)):
+        left_width = _joined_width(pieces[:split_index])
+        right_width = _joined_width(pieces[split_index:])
+        if left_width <= max_width and right_width <= max_width:
+            candidates.append(
+                (max(left_width, right_width), abs(left_width - right_width), split_index)
+            )
+    if not candidates:
+        return None
+    return min(candidates)[2]
+
+
+def _fits_two_lines(pieces: list[str], max_width: float) -> bool:
+    return _joined_width(pieces) <= max_width or _best_line_split(pieces, max_width) is not None
+
+
+def _format_chunk(pieces: list[str], max_width: float) -> str:
+    if _joined_width(pieces) <= max_width:
+        return "".join(pieces)
+    split_index = _best_line_split(pieces, max_width)
+    if split_index is None:
+        return "".join(pieces)
+    return "".join(pieces[:split_index]) + "\\N" + "".join(pieces[split_index:])
 
 
 def split_subtitle_text(text: str, max_width: float = MAX_LINE_WIDTH) -> str:
-    lines = _wrapped_lines(text, max_width)
-    return "\\N".join(lines[:2])
+    chunks = _subtitle_chunks(text, max_width)
+    return chunks[0] if chunks else ""
 
 
 def _subtitle_chunks(text: str, max_width: float = MAX_LINE_WIDTH) -> list[str]:
-    lines = _wrapped_lines(text, max_width)
-    return ["\\N".join(lines[index:index + 2]) for index in range(0, len(lines), 2)]
+    pieces = _semantic_pieces(text, max_width)
+    grouped: list[list[str]] = []
+    current: list[str] = []
+    for piece in pieces:
+        candidate = current + [piece]
+        if current and not _fits_two_lines(candidate, max_width):
+            grouped.append(current)
+            current = [piece]
+        else:
+            current = candidate
+    if current:
+        grouped.append(current)
+    return [_format_chunk(group, max_width) for group in grouped]
 
 
 def _chunk_width(text: str) -> float:
@@ -182,7 +224,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Chinese,{font_name},{FONT_SIZE},&H0000FFFF,&H0000FFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,4,0,2,{MARGIN_LEFT},{MARGIN_RIGHT},{MARGIN_BOTTOM},1
+Style: Chinese,{font_name},{FONT_SIZE},&H0000FFFF,&H0000FFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,4,0,5,{MARGIN_LEFT},{MARGIN_RIGHT},0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -208,11 +250,15 @@ def write_ass_from_vtt(
                 chunk_end = end
             else:
                 chunk_end = cursor + cue_duration * _chunk_width(chunk) / total_width
+            positioned_text = (
+                f"{{\\an5\\pos({VIDEO_WIDTH // 2},{SUBTITLE_CENTER_Y})}}"
+                f"{_escape_ass_text(chunk)}"
+            )
             events.append(
                 "Dialogue: 0,{start},{end},Chinese,,0,0,0,,{text}".format(
                     start=_seconds_to_ass(cursor),
                     end=_seconds_to_ass(chunk_end),
-                    text=_escape_ass_text(chunk),
+                    text=positioned_text,
                 )
             )
             cursor = chunk_end

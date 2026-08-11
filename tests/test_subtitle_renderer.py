@@ -40,6 +40,7 @@ def test_write_ass_uses_vertical_douyin_style(tmp_path):
     assert "PlayResX: 1080" in content
     assert "PlayResY: 1920" in content
     assert "Style: Chinese,Noto Sans CJK SC,62,&H0000FFFF" in content
-    assert ",2,50,50,380,1" in content
+    assert ",5,50,50,0,1" in content
     assert "Dialogue: 0,0:00:00.00,0:00:02.50,Chinese" in content
+    assert "{\\an5\\pos(540,1480)}" in content
     assert "\\N" in content
