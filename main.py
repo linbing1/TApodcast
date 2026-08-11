@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from src.analyzer import analyze_article
 from src.config import get_config
+from src.cover_renderer import generate_cover
 from src.llm import LLMClient
 from src.models import ImageAsset, ScrapedArticle
 from src.script_writer import write_script
@@ -61,6 +62,27 @@ def run_video_only(output_dir: str, title: str = "") -> None:
     assemble_video(image_paths, mp3_path, srt_path, video_path,
                    title=title, article_date=article_date)
     logger.info("Done! Video: %s", video_path)
+
+
+def run_cover_only(
+    output_dir: str,
+    title: str = "",
+    image_index: int = 0,
+    kicker: str = "英超新闻 · 深度报道",
+    subtitle: str = "",
+    output_name: str = "cover.png",
+) -> str:
+    logger.info("Generating cover from %s...", output_dir)
+    cover_path = generate_cover(
+        output_dir=output_dir,
+        title=title,
+        image_index=image_index,
+        kicker=kicker,
+        subtitle=subtitle,
+        output_name=output_name,
+    )
+    logger.info("Done! Cover: %s", cover_path)
+    return cover_path
 
 
 async def run(url: str, skip_video: bool = False) -> None:
@@ -231,6 +253,14 @@ def main() -> None:
     vid.add_argument("--dir", required=True, help="Output directory containing images/, audio.mp3, audio.vtt")
     vid.add_argument("--title", default="", help="Override title (reads title.txt if omitted)")
 
+    cover = sub.add_parser("cover", help="Generate a Douyin cover from existing images")
+    cover.add_argument("--dir", required=True, help="Output directory containing images/")
+    cover.add_argument("--title", default="", help="Cover title (reads title.txt if omitted)")
+    cover.add_argument("--image-index", type=int, default=0, help="Image index to use as the cover background")
+    cover.add_argument("--kicker", default="英超新闻 · 深度报道", help="Small label above the title")
+    cover.add_argument("--subtitle", default="", help="Optional supporting line below the title")
+    cover.add_argument("--output", default="cover.png", help="Output filename inside --dir")
+
     ext = sub.add_parser("extract", help="Extract article text, images, and videos")
     ext.add_argument("--url", required=True, help="The Athletic article URL")
     ext.add_argument("--dir", default="", help="Output directory (defaults to output/date/article-slug)")
@@ -252,6 +282,15 @@ def main() -> None:
 
     if args.cmd == "video":
         run_video_only(args.dir, title=args.title)
+    elif args.cmd == "cover":
+        run_cover_only(
+            args.dir,
+            title=args.title,
+            image_index=args.image_index,
+            kicker=args.kicker,
+            subtitle=args.subtitle,
+            output_name=args.output,
+        )
     elif args.cmd == "extract":
         asyncio.run(extract(args.url, output_dir=args.dir))
     elif args.cmd == "download-images":

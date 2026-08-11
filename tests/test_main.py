@@ -3,7 +3,7 @@ from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 
-from main import download_images_command, extract, generate_audio
+from main import download_images_command, extract, generate_audio, run_cover_only
 from src.models import (
     AnalyzedArticle,
     ImageAsset,
@@ -149,3 +149,27 @@ async def test_generate_audio_requires_article_text(tmp_path):
 
     with pytest.raises(ValueError, match="No article text"):
         await generate_audio(str(output_dir))
+
+
+@patch("main.generate_cover")
+def test_run_cover_only_passes_cover_options(mock_generate_cover, tmp_path):
+    mock_generate_cover.return_value = str(tmp_path / "cover.png")
+
+    result = run_cover_only(
+        str(tmp_path),
+        title="阿森纳签下领袖吉马良斯",
+        image_index=6,
+        kicker="阿森纳转会 · 深度报道",
+        subtitle="一笔重磅转会背后的故事",
+        output_name="cover-v1.png",
+    )
+
+    assert result == str(tmp_path / "cover.png")
+    mock_generate_cover.assert_called_once_with(
+        output_dir=str(tmp_path),
+        title="阿森纳签下领袖吉马良斯",
+        image_index=6,
+        kicker="阿森纳转会 · 深度报道",
+        subtitle="一笔重磅转会背后的故事",
+        output_name="cover-v1.png",
+    )

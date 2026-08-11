@@ -118,6 +118,35 @@ audio.vtt       # TTS 时间字幕
 
 如果系统中有多个 ffmpeg，可通过 `FFMPEG_BIN` 指定带 `ass` 和 `subtitles` 滤镜的可执行文件；中文字幕字体可通过 `CJK_FONT_PATH` 指定。
 
+### 第四步：生成抖音封面
+
+封面独立于视频生成，默认读取 `title.txt`，从 `images/` 选择一张图片并生成 `1080×1920` 的 `cover.png`：
+
+```bash
+.venv/bin/python main.py cover \
+  --dir "output/YYYY-MM-DD/<article-slug>"
+```
+
+可以指定主图和封面文案。下面的命令使用第 7 张图片生成 Bruno Guimarães 这篇新闻的封面：
+
+```bash
+.venv/bin/python main.py cover \
+  --dir "output/2026-08-11/bruno-guimaraes-arsenal-transfer-story-background-brazil" \
+  --image-index 6 \
+  --title "阿森纳签下领袖吉马良斯" \
+  --kicker "阿森纳转会 · 深度报道" \
+  --subtitle "一笔重磅转会背后的故事" \
+  --output cover-v1.png
+```
+
+可用参数：
+
+- `--image-index`：封面背景图索引，从 `0` 开始；
+- `--title`：主标题，省略时读取 `title.txt`；
+- `--kicker`：标题上方的小标签；
+- `--subtitle`：标题下方的辅助说明，可省略；
+- `--output`：输出文件名，默认 `cover.png`。
+
 ## 输出示例
 
 ```
@@ -128,6 +157,7 @@ output/
         ├── audio.mp3        # TTS 生成的音频
         ├── audio.vtt        # 字幕文件
         ├── subtitles.ass    # FFmpeg/libass 使用的烧录字幕
+        ├── cover.png        # 抖音封面
         └── video.mp4        # 最终视频（1080×1920，9:16）
 ```
 
