@@ -86,6 +86,8 @@ class TestAssembleVideo:
             output_dir=str(tmp_path),
             img_top=0,
             lead_in=0.0,
+            image_captions=None,
+            font_path="/fonts/NotoSansCJKsc-Regular.otf",
         )
 
     @patch("src.video_assembler.write_ass_from_vtt")

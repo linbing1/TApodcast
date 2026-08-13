@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from src.analyzer import analyze_article
 from src.config import get_config
 from src.cover_renderer import generate_cover
+from src.image_captioner import generate_image_captions, load_image_captions
 from src.llm import LLMClient
 from src.models import ImageAsset, ScrapedArticle
 from src.script_writer import write_script
@@ -58,9 +59,11 @@ def run_video_only(output_dir: str, title: str = "") -> None:
 
     video_path = os.path.join(output_dir, f"{_safe_title(title) or 'video'}.mp4")
     article_date = date.today().strftime("%Y年%m月%d日")
+    image_captions = load_image_captions(output_dir, image_paths)
     logger.info("Assembling video from %s...", output_dir)
     assemble_video(image_paths, mp3_path, srt_path, video_path,
-                   title=title, article_date=article_date)
+                   title=title, article_date=article_date,
+                   image_captions=image_captions)
     logger.info("Done! Video: %s", video_path)
 
 
@@ -104,7 +107,10 @@ async def run(url: str, skip_video: bool = False) -> None:
     with open(os.path.join(output_dir, "title.txt"), "w", encoding="utf-8") as f:
         f.write(analyzed.title_cn)
 
-    logger.info("Step 2.2: Writing podcast script with LLM...")
+    logger.info("Step 2.2: Translating and shortening image captions with LLM...")
+    generate_image_captions(output_dir, llm)
+
+    logger.info("Step 2.3: Writing podcast script with LLM...")
     today = date.today()
     speech_date = f"{today.year}年{today.month}月{today.day}日"
     script = write_script(analyzed, llm, date_str=speech_date)
@@ -115,7 +121,7 @@ async def run(url: str, skip_video: bool = False) -> None:
         f.write(script.text)
     logger.info("Script saved to %s", script_path)
 
-    logger.info("Step 2.3: Generating audio and VTT subtitles with edge-tts...")
+    logger.info("Step 2.4: Generating audio and VTT subtitles with edge-tts...")
     mp3_path, srt_path = await generate_tts(script, config["tts_voice"], output_dir, config["tts_rate"])
 
     if skip_video:
@@ -125,8 +131,10 @@ async def run(url: str, skip_video: bool = False) -> None:
     logger.info("Step 3: Assembling the vertical video with burned-in subtitles...")
     video_path = os.path.join(output_dir, f"{_safe_title(analyzed.title_cn)}.mp4")
     article_date = date.today().strftime("%Y年%m月%d日")
+    image_captions = load_image_captions(output_dir, article.image_paths)
     assemble_video(article.image_paths, mp3_path, srt_path, video_path,
-                   title=analyzed.title_cn, article_date=article_date)
+                   title=analyzed.title_cn, article_date=article_date,
+                   image_captions=image_captions)
 
     logger.info("Done! Video: %s", video_path)
 
@@ -222,14 +230,17 @@ async def generate_audio(output_dir: str) -> str:
     with open(os.path.join(output_dir, "title.txt"), "w", encoding="utf-8") as f:
         f.write(analyzed.title_cn)
 
-    logger.info("Step 2.2: Writing podcast script with LLM...")
+    logger.info("Step 2.2: Translating and shortening image captions with LLM...")
+    generate_image_captions(output_dir, llm)
+
+    logger.info("Step 2.3: Writing podcast script with LLM...")
     today = date.today()
     speech_date = f"{today.year}年{today.month}月{today.day}日"
     script = write_script(analyzed, llm, date_str=speech_date)
     with open(os.path.join(output_dir, "script.txt"), "w", encoding="utf-8") as f:
         f.write(script.text)
 
-    logger.info("Step 2.3: Generating audio with edge-tts...")
+    logger.info("Step 2.4: Generating audio with edge-tts...")
     mp3_path, vtt_path = await generate_tts(
         script,
         config["tts_voice"],

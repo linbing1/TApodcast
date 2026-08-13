@@ -91,6 +91,7 @@ def assemble_video(
     output_path: str,
     title: str = "",
     article_date: str = "",
+    image_captions: list[str] | None = None,
 ) -> str:
     del title, article_date
 
@@ -119,6 +120,8 @@ def assemble_video(
         output_dir=output_dir,
         img_top=0,
         lead_in=0.0,
+        image_captions=image_captions,
+        font_path=font_path,
     )
 
     cmd = [

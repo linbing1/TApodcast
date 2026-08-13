@@ -9,6 +9,7 @@ from src.scraper import (
     _extract_jsonld_images,
     _merge_images,
     _select_cover_image,
+    _split_caption_credit,
     download_images,
     scrape_article,
 )
@@ -116,6 +117,16 @@ def test_select_cover_image_falls_back_to_positional_match():
         "https://cdn.example.com/missing.jpg",
         "https://cdn.example.com/body.jpg",
     ) == (1, "https://cdn.example.com/body.jpg")
+
+
+def test_split_caption_credit_separates_parenthesized_photo_source():
+    caption, credit = _split_caption_credit(
+        "Jeff Bezos founded Amazon from his garage in 1994 "
+        "(Julien De Rosa/AFP via Getty Images)"
+    )
+
+    assert caption == "Jeff Bezos founded Amazon from his garage in 1994"
+    assert credit == "Julien De Rosa/AFP via Getty Images"
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
@@ -247,6 +248,23 @@ def _find_cover_image_index(images: list[ImageAsset], cover_url: str) -> int | N
     return 0
 
 
+def _split_caption_credit(caption: str, credit: str = "") -> tuple[str, str]:
+    normalized_caption = " ".join(caption.split()).strip()
+    normalized_credit = " ".join(credit.split()).strip()
+    if normalized_credit or not normalized_caption:
+        return normalized_caption, normalized_credit
+
+    match = re.search(
+        r"\s*[（(]([^()（）]*(?:Getty|Images|Reuters|AP|AFP|PA|Imagn|The Athletic)"
+        r"[^()（）]*)[）)]\s*$",
+        normalized_caption,
+        re.IGNORECASE,
+    )
+    if not match:
+        return normalized_caption, ""
+    return normalized_caption[:match.start()].strip(), match.group(1).strip()
+
+
 def _select_cover_image(
     images: list[ImageAsset],
     metadata_url: str,
@@ -382,6 +400,28 @@ async def _extract_page_content_data(page: Page, url: str) -> PageContent:
                     if (videoPosterUrls.has(absolute) || videoHostRe.test(absolute) || skipPathRe.test(absolute)) continue;
                     const w = img.naturalWidth || parseInt(img.getAttribute('width') || '0');
                     if (w === 0 || w >= 300) {
+                        const captionContainer = img.closest(
+                            'figure, .wp-caption, [class*="FeaturedImageContainer"], '
+                            + '[class*="ArticleImage"], [class*="ImageWrapper"]'
+                        ) || img.parentElement?.parentElement;
+                        const captionSelectors = [
+                            'figcaption',
+                            '.inline-credits .credits-text',
+                            '.credits-text',
+                            '[class*="ImageCaption"]',
+                            '[class*="imageCaption"]',
+                        ];
+                        let caption = img.getAttribute('title') || '';
+                        if (captionContainer) {
+                            for (const captionSelector of captionSelectors) {
+                                const captionNode = captionContainer.querySelector(captionSelector);
+                                const captionText = captionNode?.textContent?.trim() || '';
+                                if (captionText) {
+                                    caption = captionText;
+                                    break;
+                                }
+                            }
+                        }
                         const rect = img.getBoundingClientRect();
                         const imageTop = rect.top + window.scrollY;
                         const imageBottom = rect.bottom + window.scrollY;
@@ -399,6 +439,7 @@ async def _extract_page_content_data(page: Page, url: str) -> PageContent:
                         images.push({
                             url: absolute,
                             alt: img.getAttribute('alt') || '',
+                            caption,
                             width: w || null,
                             height: img.naturalHeight || parseInt(img.getAttribute('height') || '0') || null,
                             headingDistance,
@@ -489,15 +530,22 @@ async def _extract_page_content_data(page: Page, url: str) -> PageContent:
         matched_selector,
     )
 
-    dom_images = [
-        ImageAsset(
-            url=item["url"],
-            alt=item.get("alt", ""),
-            width=_to_int(item.get("width")),
-            height=_to_int(item.get("height")),
+    dom_images = []
+    for item in media.get("images", []):
+        caption, credit = _split_caption_credit(
+            item.get("caption", ""),
+            item.get("credit", ""),
         )
-        for item in media.get("images", [])
-    ]
+        dom_images.append(
+            ImageAsset(
+                url=item["url"],
+                alt=item.get("alt", ""),
+                caption=caption,
+                credit=credit,
+                width=_to_int(item.get("width")),
+                height=_to_int(item.get("height")),
+            )
+        )
     jsonld_images = _extract_jsonld_images(media.get("jsonLd", []), url)
     images = _merge_images(jsonld_images, dom_images)
     cover_image_index, cover_image_url = _select_cover_image(
@@ -655,6 +703,8 @@ async def scrape_article(url: str, cookies: list[dict], output_dir: str) -> Scra
         cookies=cookies,
         cover_image_index=content.cover_image_index,
     )
+    with open(os.path.join(output_dir, "images.json"), "w", encoding="utf-8") as images_file:
+        json.dump(records, images_file, ensure_ascii=False, indent=2)
     image_paths = [
         os.path.join(output_dir, record["local_path"])
         for record in records
