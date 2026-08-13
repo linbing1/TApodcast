@@ -2,7 +2,7 @@
 
 将 The Athletic 文章自动生成适合抖音发布的竖屏短视频（中文配音 + 图片轮播 + 字幕）。
 
-## 四步流程
+## 五步流程
 
 ```
 文章 URL
@@ -10,6 +10,7 @@
   → 第二步：LLM 分析正文与图注，生成播报稿、TTS 配音与字幕
   → 第三步：图片和对应中文图注轮播，合成配音与字幕
   → 第四步：使用文章主图和中文标题生成抖音封面
+  → 第五步：生成抖音发布标题、作品简介和话题
 ```
 
 | 步骤 | 输入 | 主要处理 | 产物 |
@@ -18,6 +19,7 @@
 | 第二步：LLM + TTS | `page.json`、`images.json` | 分析正文，将英文图片说明翻译并精简为中文，生成中文播报稿、约三分钟配音和时间字幕 | `analysis.json`、`image_captions.json`、`title.txt`、`script.txt`、`audio.mp3`、`audio.vtt` |
 | 第三步：视频合成 | `images/`、`image_captions.json`、`audio.mp3`、`audio.vtt` | 按图片路径匹配中文图注，生成图片轮播并烧录黄色口播字幕 | `subtitles.ass`、`<中文标题>.mp4` |
 | 第四步：封面生成 | 封面主图和 `title.txt` | 生成带栏目标签、当前日期和中文标题的独立竖屏封面 | `cover.png` |
+| 第五步：发布文案 | `page.json`、`analysis.json`、`script.txt`、`title.txt` | 整理不超过30字的抖音标题，并生成作品简介和相关话题 | `publish.json`、`publish_title.txt`、`publish_description.txt` |
 
 ## 环境要求
 
@@ -58,7 +60,7 @@ Cookie 导出推荐使用 [Cookie-Editor](https://cookie-editor.com/) 浏览器�
 
 ## 快速使用
 
-下面的命令会连续执行第一至第三步，生成视频，但不会自动生成第四步的独立封面：
+下面的命令会连续执行第一至第三步，生成视频，但不会自动生成第四步的封面或第五步的发布文案：
 
 ```bash
 .venv/bin/python main.py run \
@@ -69,6 +71,13 @@ Cookie 导出推荐使用 [Cookie-Editor](https://cookie-editor.com/) 浏览器�
 
 ```bash
 .venv/bin/python main.py cover \
+  --dir "output/YYYY-MM-DD/<article-slug>"
+```
+
+封面生成默认读取 `title.txt`。第五步会继续使用同一标题，不会重新生成另一个标题：
+
+```bash
+.venv/bin/python main.py publish-copy \
   --dir "output/YYYY-MM-DD/<article-slug>"
 ```
 
@@ -195,6 +204,42 @@ audio.vtt            # TTS 时间字幕
 - 中部文章主图；
 - 下方中文主标题和 `英超每日观察` 品牌文字。
 
+封面标题读取 `title.txt`。该标题由第二步的 LLM 生成，限制为不超过30个汉字，并同时作为第五步的抖音作品标题。这样封面标题和发布页标题保持一致。
+
+### 第五步：生成抖音发布内容
+
+从文章正文分析、中文口播稿和第二步生成的标题整理抖音发布页需要填写的内容：
+
+```bash
+.venv/bin/python main.py publish-copy \
+  --dir "output/YYYY-MM-DD/<article-slug>"
+```
+
+也可以使用兼容别名：
+
+```bash
+.venv/bin/python main.py publish \
+  --dir "output/YYYY-MM-DD/<article-slug>"
+```
+
+第五步生成：
+
+```text
+publish.json              # 结构化发布内容
+publish_title.txt         # 作品标题，可直接填写到“作品描述”顶部标题栏
+publish_description.txt   # 作品简介和带 # 的话题，可直接粘贴到简介输入框
+```
+
+生成规则：
+
+- 作品标题不超过30个汉字、数字或标点，兼顾吸引力和准确性；
+- 标题不使用夸张、虚构或空洞的标题党表达；
+- 作品标题与第四步封面标题共用 `title.txt`，保持完全一致；
+- 作品简介概括文章核心事件、人物和看点；
+- 简介末尾自动添加3至6个相关话题，例如 `#英超 #切尔西 #足球新闻`；
+- 最终简介与话题合计不超过1000个字符，适合直接粘贴到抖音表单；
+- `publish.json` 同时保留不带话题的 `description` 和带话题的 `description_with_hashtags`。
+
 ### 完整的逐步执行示例
 
 ```bash
@@ -213,6 +258,9 @@ OUT="output/YYYY-MM-DD/<article-slug>"
 
 # 第四步：生成独立封面
 .venv/bin/python main.py cover --dir "$OUT"
+
+# 第五步：生成抖音标题、作品简介和话题
+.venv/bin/python main.py publish-copy --dir "$OUT"
 ```
 
 ## 输出示例
@@ -233,6 +281,9 @@ output/
         ├── audio.vtt        # 字幕文件
         ├── subtitles.ass    # FFmpeg/libass 使用的烧录字幕
         ├── cover.png        # 抖音封面
+        ├── publish.json     # 抖音发布标题、简介和话题
+        ├── publish_title.txt # 可直接填写的作品标题
+        ├── publish_description.txt # 可直接粘贴的简介和话题
         └── video.mp4        # 最终视频（1080×1920，9:16）
 ```
 

@@ -3,7 +3,13 @@ from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 
-from main import download_images_command, extract, generate_audio, run_cover_only
+from main import (
+    download_images_command,
+    extract,
+    generate_audio,
+    run_cover_only,
+    run_publish_only,
+)
 from src.models import (
     AnalyzedArticle,
     ImageAsset,
@@ -172,4 +178,36 @@ def test_run_cover_only_passes_cover_options(mock_generate_cover, tmp_path):
         kicker="阿森纳转会 · 深度报道",
         subtitle="一笔重磅转会背后的故事",
         output_name="cover-v1.png",
+    )
+
+
+@patch("main.generate_publish_copy")
+@patch("main.LLMClient")
+@patch("main.get_config")
+def test_run_publish_only_generates_publish_files(
+    mock_get_config,
+    mock_llm_class,
+    mock_generate_publish_copy,
+    tmp_path,
+):
+    mock_get_config.return_value = {
+        "llm_base_url": "https://llm.example.com/v1",
+        "llm_api_key": "test-key",
+        "llm_model": "test-model",
+    }
+    mock_generate_publish_copy.return_value = {
+        "title": "统一的封面和发布标题",
+    }
+
+    result = run_publish_only(str(tmp_path))
+
+    assert result == str(tmp_path / "publish.json")
+    mock_llm_class.assert_called_once_with(
+        "https://llm.example.com/v1",
+        "test-key",
+        "test-model",
+    )
+    mock_generate_publish_copy.assert_called_once_with(
+        str(tmp_path),
+        mock_llm_class.return_value,
     )

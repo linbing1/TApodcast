@@ -36,6 +36,26 @@ def test_generate_cover_reads_title_and_writes_vertical_png(tmp_path, monkeypatc
     assert Image.open(output).size == (1080, 1920)
 
 
+def test_generate_cover_prefers_shared_title_file(tmp_path, monkeypatch):
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    Image.new("RGB", (1200, 800), "#164d75").save(image_dir / "000.jpg")
+    (tmp_path / "title.txt").write_text("统一的封面和发布标题", encoding="utf-8")
+    (tmp_path / "publish_title.txt").write_text("旧的发布标题", encoding="utf-8")
+
+    captured = {}
+
+    def fake_render_cover(**kwargs):
+        captured.update(kwargs)
+        return kwargs["output_path"]
+
+    monkeypatch.setattr(cover_renderer, "render_cover", fake_render_cover)
+
+    cover_renderer.generate_cover(str(tmp_path))
+
+    assert captured["title"] == "统一的封面和发布标题"
+
+
 class ImageFontForTest:
     def __init__(self):
         from PIL import ImageFont

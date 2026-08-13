@@ -15,6 +15,7 @@ from src.cover_renderer import generate_cover
 from src.image_captioner import generate_image_captions, load_image_captions
 from src.llm import LLMClient
 from src.models import ImageAsset, ScrapedArticle
+from src.publish_copy import generate_publish_copy
 from src.script_writer import write_script
 from src.scraper import download_images as download_image_assets
 from src.scraper import extract_page_content, scrape_article
@@ -88,6 +89,16 @@ def run_cover_only(
     return cover_path
 
 
+def run_publish_only(output_dir: str) -> str:
+    config = get_config()
+    llm = LLMClient(config["llm_base_url"], config["llm_api_key"], config["llm_model"])
+    logger.info("Generating Douyin publish copy from %s...", output_dir)
+    result = generate_publish_copy(output_dir, llm)
+    logger.info("Publish title: %s", result["title"])
+    logger.info("Publish copy saved to %s", os.path.join(output_dir, "publish.json"))
+    return os.path.join(output_dir, "publish.json")
+
+
 async def run(url: str, skip_video: bool = False) -> None:
     config = get_config()
     slug = _article_slug(url)
@@ -104,6 +115,8 @@ async def run(url: str, skip_video: bool = False) -> None:
     logger.info("Step 2.1: Analyzing article with LLM...")
     analyzed = analyze_article(article, llm)
     logger.info("Analysis complete: %s", analyzed.title_cn)
+    with open(os.path.join(output_dir, "analysis.json"), "w", encoding="utf-8") as f:
+        json.dump(asdict(analyzed), f, ensure_ascii=False, indent=2)
     with open(os.path.join(output_dir, "title.txt"), "w", encoding="utf-8") as f:
         f.write(analyzed.title_cn)
 
@@ -273,6 +286,13 @@ def main() -> None:
     cover.add_argument("--subtitle", default="", help="Optional supporting line below the title")
     cover.add_argument("--output", default="cover.png", help="Output filename inside --dir")
 
+    publish = sub.add_parser(
+        "publish-copy",
+        aliases=["publish"],
+        help="Generate Douyin title, description, and hashtags",
+    )
+    publish.add_argument("--dir", required=True, help="Directory containing article outputs")
+
     ext = sub.add_parser("extract", help="Extract article text, images, and videos")
     ext.add_argument("--url", required=True, help="The Athletic article URL")
     ext.add_argument("--dir", default="", help="Output directory (defaults to output/date/article-slug)")
@@ -303,6 +323,8 @@ def main() -> None:
             subtitle=args.subtitle,
             output_name=args.output,
         )
+    elif args.cmd in ("publish-copy", "publish"):
+        run_publish_only(args.dir)
     elif args.cmd == "extract":
         asyncio.run(extract(args.url, output_dir=args.dir))
     elif args.cmd == "download-images":

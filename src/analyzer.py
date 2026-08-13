@@ -8,13 +8,14 @@ from src.models import AnalyzedArticle, ScrapedArticle
 logger = logging.getLogger(__name__)
 
 _ANALYZED_FIELDS = {f.name for f in fields(AnalyzedArticle)}
+_TITLE_MAX_LENGTH = 30
 
 _SYSTEM_PROMPT = """你是一位资深英超足球记者和分析师。请对以下英超文章进行深度中文分析。
 
 核心原则：尽量保留原文的丰富内容，不要过度精简。读者希望通过你的分析获取接近原文的信息量，而不仅仅是摘要。
 
 返回一个 JSON 对象，包含：
-- title_cn: 中文标题翻译，不超过10个汉字，精炼概括核心事件
+- title_cn: 适合抖音作品和封面的中文标题，不超过30个汉字；准确概括核心事件并突出人物、冲突或悬念，要有吸引力但不夸大、不虚构，不使用“震惊”“速看”等空洞标题党词语
 - title_original: 英文原标题
 - article_type: 文章类型（深度分析/新闻报道/战术解读/转会动态/赛后分析）
 - overview: 3-5 句话概述核心论点，包含关键结论和背景（中文）
@@ -47,6 +48,10 @@ def analyze_article(article: ScrapedArticle, llm: LLMClient) -> AnalyzedArticle:
     response = llm.complete(_SYSTEM_PROMPT, user_text, json_mode=True)
     data = _parse_response(response)
     filtered = {k: v for k, v in data.items() if k in _ANALYZED_FIELDS}
+    if "title_cn" in filtered:
+        filtered["title_cn"] = " ".join(str(filtered["title_cn"]).split()).strip(
+            "\"'“”‘’# "
+        )[:_TITLE_MAX_LENGTH]
     filtered.setdefault("link", article.link)
     try:
         return AnalyzedArticle(**filtered)

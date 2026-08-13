@@ -52,3 +52,15 @@ class TestAnalyzeArticle:
         mock_llm.complete.return_value = "not json at all"
         with pytest.raises(ValueError, match="Failed to parse"):
             analyze_article(_make_scraped(), mock_llm)
+
+    def test_normalizes_and_limits_douyin_title(self):
+        mock_llm = MagicMock()
+        response = json.loads(_valid_response())
+        response["title_cn"] = "“#这是一个超过三十个字符而且需要被严格截断的中文封面标题用于测试”"
+        mock_llm.complete.return_value = json.dumps(response, ensure_ascii=False)
+
+        result = analyze_article(_make_scraped(), mock_llm)
+
+        assert len(result.title_cn) == 30
+        assert "#" not in result.title_cn
+        assert "“" not in result.title_cn

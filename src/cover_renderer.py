@@ -216,9 +216,12 @@ def generate_cover(
         image_path = image_paths[image_index]
 
     if not title:
-        title_path = Path(output_dir) / "title.txt"
-        if title_path.exists():
-            title = title_path.read_text(encoding="utf-8").strip()
+        for title_name in ("title.txt", "publish_title.txt"):
+            title_path = Path(output_dir) / title_name
+            if title_path.exists():
+                title = title_path.read_text(encoding="utf-8").strip()
+                if title:
+                    break
     if not title:
         raise ValueError(f"No cover title found in {output_dir}")
 
