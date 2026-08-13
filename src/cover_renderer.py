@@ -16,6 +16,47 @@ PHOTO_TOP = 500
 PHOTO_HEIGHT = 540
 LEFT_MARGIN = 76
 MAX_TITLE_WIDTH = COVER_WIDTH - LEFT_MARGIN * 2
+TITLE_FONT_SIZE = 96
+MIN_TITLE_FONT_SIZE = 72
+TITLE_FONT_STEP = 2
+TITLE_LINE_HEIGHT = 120
+TITLE_STROKE_WIDTH = 2
+TITLE_PUNCTUATION = frozenset("，。！？：；、,.!?;:")
+TITLE_PROTECTED_PHRASES = tuple(
+    sorted(
+        {
+            "刘易斯-斯凯利",
+            "阿森纳",
+            "心属阿森纳",
+            "曼联",
+            "切尔西",
+            "利物浦",
+            "曼城",
+            "热刺",
+            "纽卡斯尔",
+            "西汉姆",
+            "水晶宫",
+            "诺丁汉森林",
+            "阿斯顿维拉",
+            "布莱顿",
+            "伯恩茅斯",
+            "巴黎圣日耳曼",
+            "皇家马德里",
+            "巴塞罗那",
+            "拜仁慕尼黑",
+            "国际米兰",
+            "英超",
+            "欧冠",
+            "世界杯",
+            "欧洲杯",
+            "转会市场",
+            "青训学院",
+            "一线队",
+        },
+        key=len,
+        reverse=True,
+    )
+)
 ACCENT = "#ffd400"
 WHITE = "#f7f7f2"
 MUTED = "#b9bbc2"
@@ -44,13 +85,131 @@ def _load_date_font(size: int) -> ImageFont.FreeTypeFont:
     return _load_font(size)
 
 
-def _text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont) -> int:
-    bounds = draw.textbbox((0, 0), text, font=font)
+def _text_width(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    stroke_width: int = 0,
+) -> int:
+    bounds = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
     return bounds[2] - bounds[0]
+
+
+def _title_width(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+) -> int:
+    return _text_width(draw, text, font, stroke_width=TITLE_STROKE_WIDTH)
 
 
 def _format_cover_date(value: date | None = None) -> str:
     return (value or date.today()).strftime("%Y.%m.%d")
+
+
+def _title_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index].isspace():
+            index += 1
+            continue
+
+        phrase = next(
+            (candidate for candidate in TITLE_PROTECTED_PHRASES if text.startswith(candidate, index)),
+            "",
+        )
+        if phrase:
+            tokens.append(phrase)
+            index += len(phrase)
+            continue
+
+        if text[index].isascii() and (text[index].isalnum() or text[index] in "-_+&./"):
+            end = index + 1
+            while end < len(text) and text[end].isascii() and (
+                text[end].isalnum() or text[end] in "-_+&./"
+            ):
+                end += 1
+            tokens.append(text[index:end])
+            index = end
+            continue
+
+        if text[index] in TITLE_PUNCTUATION:
+            if tokens:
+                tokens[-1] += text[index]
+            else:
+                tokens.append(text[index])
+        else:
+            tokens.append(text[index])
+        index += 1
+    return tokens
+
+
+def _break_score(tokens: list[str], boundary: int) -> int:
+    previous = tokens[boundary - 1].rstrip()
+    following = tokens[boundary].lstrip()
+    score = 0
+    if previous and previous[-1] in TITLE_PUNCTUATION:
+        score += 1000
+    if following and following[0] in TITLE_PUNCTUATION:
+        score -= 1000
+    if previous in TITLE_PROTECTED_PHRASES:
+        score += 10
+    return score
+
+
+def _join_tokens(tokens: list[str]) -> str:
+    return "".join(tokens).strip()
+
+
+def _best_two_line_split(
+    tokens: list[str],
+    draw: ImageDraw.ImageDraw,
+    font: ImageFont.FreeTypeFont,
+) -> list[str] | None:
+    candidates: list[tuple[int, int, int, int]] = []
+    for boundary in range(1, len(tokens)):
+        first = _join_tokens(tokens[:boundary])
+        second = _join_tokens(tokens[boundary:])
+        first_width = _title_width(draw, first, font)
+        second_width = _title_width(draw, second, font)
+        if first_width <= MAX_TITLE_WIDTH and second_width <= MAX_TITLE_WIDTH:
+            balance = abs(first_width - second_width)
+            candidates.append((_break_score(tokens, boundary), -balance, -max(first_width, second_width), boundary))
+    if not candidates:
+        return None
+    boundary = max(candidates)[3]
+    return [_join_tokens(tokens[:boundary]), _join_tokens(tokens[boundary:])]
+
+
+def _wrap_title_tokens(
+    tokens: list[str],
+    draw: ImageDraw.ImageDraw,
+    font: ImageFont.FreeTypeFont,
+) -> list[str]:
+    lines: list[str] = []
+    remaining = tokens[:]
+    while remaining:
+        full_line = _join_tokens(remaining)
+        if _title_width(draw, full_line, font) <= MAX_TITLE_WIDTH:
+            lines.append(full_line)
+            break
+
+        candidates: list[tuple[int, int, int]] = []
+        for boundary in range(1, len(remaining) + 1):
+            line = _join_tokens(remaining[:boundary])
+            width = _title_width(draw, line, font)
+            if width <= MAX_TITLE_WIDTH:
+                candidates.append((_break_score(remaining, boundary) if boundary < len(remaining) else 0, width, boundary))
+        if not candidates:
+            lines.append(remaining[0])
+            remaining = remaining[1:]
+            continue
+
+        boundary = max(candidates)[2]
+        lines.append(_join_tokens(remaining[:boundary]))
+        remaining = remaining[boundary:]
+    return lines
 
 
 def _split_title(
@@ -61,25 +220,31 @@ def _split_title(
     title = title.replace("\\n", "\n").strip()
     if not title:
         return []
-    explicit_lines = [line.strip() for line in title.splitlines() if line.strip()]
-    if len(explicit_lines) > 1:
-        return explicit_lines[:2]
-    title = explicit_lines[0]
-    if _text_width(draw, title, font) <= MAX_TITLE_WIDTH:
-        return [title]
+    lines: list[str] = []
+    for explicit_line in title.splitlines():
+        tokens = _title_tokens(explicit_line.strip())
+        if not tokens:
+            continue
+        two_line_split = _best_two_line_split(tokens, draw, font)
+        if two_line_split:
+            lines.extend(two_line_split)
+        else:
+            lines.extend(_wrap_title_tokens(tokens, draw, font))
+    return lines
 
-    candidates: list[tuple[int, int, int]] = []
-    for split_index in range(1, len(title)):
-        first_width = _text_width(draw, title[:split_index], font)
-        second_width = _text_width(draw, title[split_index:], font)
-        if first_width <= MAX_TITLE_WIDTH and second_width <= MAX_TITLE_WIDTH:
-            candidates.append(
-                (max(first_width, second_width), abs(first_width - second_width), split_index)
-            )
-    if not candidates:
-        return [title[:18], title[18:]]
-    split_index = min(candidates)[2]
-    return [title[:split_index], title[split_index:]]
+
+def _fit_title(
+    title: str,
+    draw: ImageDraw.ImageDraw,
+) -> tuple[ImageFont.FreeTypeFont, list[str]]:
+    for size in range(TITLE_FONT_SIZE, MIN_TITLE_FONT_SIZE - 1, -TITLE_FONT_STEP):
+        font = _load_font(size)
+        lines = _split_title(title, draw, font)
+        if len(lines) <= 2:
+            return font, lines
+
+    font = _load_font(MIN_TITLE_FONT_SIZE)
+    return font, _split_title(title, draw, font)
 
 
 def _draw_cover_text(
@@ -91,12 +256,10 @@ def _draw_cover_text(
     date_text: str,
 ) -> None:
     draw = ImageDraw.Draw(canvas)
-    title_font = _load_font(96)
+    title_font, title_lines = _fit_title(title, draw)
     kicker_font = _load_font(34)
     date_font = _load_date_font(60)
     meta_font = _load_font(28)
-    title_lines = _split_title(title, draw, title_font)
-
     kicker_position = (LEFT_MARGIN, 150)
     draw.text(kicker_position, kicker, font=kicker_font, fill=ACCENT)
     kicker_bounds = draw.textbbox(kicker_position, kicker, font=kicker_font)
@@ -114,20 +277,20 @@ def _draw_cover_text(
     title_y = 1110 if len(title_lines) > 1 else 1170
     for index, line in enumerate(title_lines):
         draw.text(
-            (LEFT_MARGIN, title_y + index * 120),
+            (LEFT_MARGIN, title_y + index * TITLE_LINE_HEIGHT),
             line,
             font=title_font,
             fill=WHITE if index == 0 else ACCENT,
-            stroke_width=2,
+            stroke_width=TITLE_STROKE_WIDTH,
             stroke_fill="#000000",
         )
 
     if subtitle:
-        subtitle_y = title_y + len(title_lines) * 120 + 60
+        subtitle_y = title_y + len(title_lines) * TITLE_LINE_HEIGHT + 60
         draw.text((LEFT_MARGIN, subtitle_y), subtitle, font=kicker_font, fill=WHITE)
         rule_y = subtitle_y + 100
     else:
-        rule_y = title_y + len(title_lines) * 120 + 50
+        rule_y = title_y + len(title_lines) * TITLE_LINE_HEIGHT + 50
 
     draw.line((LEFT_MARGIN, rule_y, COVER_WIDTH - LEFT_MARGIN, rule_y), fill="#3b3d45", width=2)
     draw.text((LEFT_MARGIN, rule_y + 50), brand, font=meta_font, fill=MUTED)
