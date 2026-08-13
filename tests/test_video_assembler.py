@@ -51,7 +51,7 @@ class TestAssembleVideo:
         mock_find_font.return_value = "/fonts/NotoSansCJKsc-Regular.otf"
         frames_dir = tmp_path / "frames"
         frames_dir.mkdir()
-        mock_render_frames.return_value = (str(frames_dir), 5)
+        mock_render_frames.return_value = (str(frames_dir), 15)
 
         images = [str(tmp_path / f"img{i}.jpg") for i in range(3)]
         mp3 = str(tmp_path / "audio.mp3")
@@ -108,7 +108,7 @@ class TestAssembleVideo:
     ):
         frames_dir = tmp_path / "rendered-frames"
         frames_dir.mkdir()
-        mock_render_frames.return_value = (str(frames_dir), 5)
+        mock_render_frames.return_value = (str(frames_dir), 15)
 
         assemble_video(
             [str(tmp_path / "img0.jpg"), str(tmp_path / "img1.jpg")],
