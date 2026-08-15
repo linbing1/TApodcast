@@ -145,7 +145,15 @@ async def test_generate_audio_reads_page_and_writes_stage_outputs(
 
 
 @pytest.mark.asyncio
-async def test_generate_audio_requires_article_text(tmp_path):
+@patch("main.get_config")
+async def test_generate_audio_requires_article_text(mock_get_config, tmp_path):
+    mock_get_config.return_value = {
+        "llm_base_url": "https://llm.example.com/v1",
+        "llm_api_key": "test-key",
+        "llm_model": "test-model",
+        "tts_voice": "zh-CN-YunjianNeural",
+        "tts_rate": "+25%",
+    }
     output_dir = tmp_path / "article"
     output_dir.mkdir()
     (output_dir / "page.json").write_text(
@@ -198,10 +206,14 @@ def test_run_publish_only_generates_publish_files(
     mock_generate_publish_copy.return_value = {
         "title": "统一的封面和发布标题",
     }
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    (frames_dir / "00000.jpg").write_bytes(b"jpg")
 
     result = run_publish_only(str(tmp_path))
 
     assert result == str(tmp_path / "publish.json")
+    assert not frames_dir.exists()
     mock_llm_class.assert_called_once_with(
         "https://llm.example.com/v1",
         "test-key",

@@ -18,6 +18,14 @@ class LLMClient:
     api_key: str
     model: str
 
+    def __post_init__(self) -> None:
+        if not self.api_key:
+            raise RuntimeError(
+                "缺少 LLM_API_KEY 环境变量。配置只从进程环境变量读取（不支持 .env 文件），"
+                "请先 export LLM_API_KEY=... 再运行。"
+                "注意脚本、定时任务等非交互 shell 不会自动加载 ~/.zshrc。"
+            )
+
     def complete(self, system: str, user: str, json_mode: bool = False) -> str:
         payload: dict = {
             "model": self.model,

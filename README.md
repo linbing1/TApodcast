@@ -58,6 +58,12 @@ export ATHLETIC_COOKIES='[{"name":"...","value":"...","domain":".nytimes.com",..
 
 Cookie 导出推荐使用 [Cookie-Editor](https://cookie-editor.com/) 浏览器插件，在 The Athletic 文章页面导出为 JSON 格式。
 
+### 环境变量加载说明
+
+- 配置只从进程环境变量读取，不支持 `.env` 文件；
+- 脚本、定时任务、CI 等非交互 shell 不会自动加载 `~/.zshrc`，需要在命令前显式注入变量，例如 `LLM_API_KEY=... .venv/bin/python main.py ...`；
+- `LLM_API_KEY` 缺失时会在构造 LLM 客户端时直接报错退出；`ATHLETIC_COOKIES` 缺失、为空数组或不是合法 JSON 时同样会在启动时直接报错退出。
+
 ## 快速使用
 
 下面的命令会连续执行第一至第三步，生成视频，但不会自动生成第四步的封面或第五步的发布文案：
@@ -67,7 +73,7 @@ Cookie 导出推荐使用 [Cookie-Editor](https://cookie-editor.com/) 浏览器�
   --url "https://www.nytimes.com/athletic/ARTICLE_ID/..."
 ```
 
-输出文件保存在 `output/YYYY-MM-DD/<article-slug>/`。视频完成后执行第四步：
+输出文件保存在 `output/YYYY-MM-DD/<article-slug>/`，其中日期是**运行当天的日期**，不是文章发布日期。注意 `run` 没有断点续跑逻辑：重新执行会重新抓取页面并重新调用 LLM，如果中途失败，建议改用下文的分步骤命令从断点继续；`run --skip-video` 可以在 TTS 完成后停止，跳过视频合成。视频完成后执行第四步：
 
 ```bash
 .venv/bin/python main.py cover \
@@ -135,6 +141,8 @@ audio.mp3            # TTS 音频
 audio.vtt            # TTS 时间字幕
 ```
 
+播报稿以约 3 分钟口播为目标，超长时会自动压缩重写，成品通常在 2 至 3 分钟之间。
+
 图片图注规则：
 
 - 优先使用第一步抓到的 `caption`，缺失时才使用图片 `alt`；
@@ -154,7 +162,7 @@ audio.vtt            # TTS 时间字幕
 
 当前视频流程固定为：
 
-- 输出 `1080×1920`、`30fps` 的 `9:16` 竖屏视频；
+- 输出 `1080×1920`、`30fps` 的 `9:16` 竖屏视频。中间帧以 15fps 渲染，最终由 FFmpeg 统一编码为 30fps，日志中的 15fps 是中间帧渲染节奏，不是最终帧率；
 - 图片保持比例，横向图片在纯黑画布上尽量铺满宽度并垂直居中；
 - 图片按每张约 5 秒轮播，视频时长与 `audio.mp3` 对齐；
 - 图片在每个轮播片段内从 `100%` 平滑放大到约 `108%`，横向图片左右平移，纵向图片上下平移；相邻图片使用约 `0.3 秒` 淡入淡出转场；
@@ -165,7 +173,8 @@ audio.vtt            # TTS 时间字幕
 - 图注文字按字体实际可见边界垂直居中在背景框内，保持上下内边距一致；
 - 暂不处理视频素材、渐变、模糊背景或视频标题层；
 - 使用 `audio.vtt` 生成 `subtitles.ass`，再由带 `libass` 的 FFmpeg 烧录黄色、黑色描边字幕；
-- 字幕最多两行，并统一以画面 `y=1480` 为中心；单行会位于双行区域的垂直中间，直接与音频时间轴对齐。
+- 字幕最多两行，并统一以画面 `y=1480` 为中心；单行会位于双行区域的垂直中间，直接与音频时间轴对齐；
+- 渲染产生的 `frames/` 中间帧目录会在视频编码成功后自动删除；编码失败时保留用于排查，第五步 `publish-copy` 结束时也会兜底清理（见下文“清理中间产物”）。
 
 如果系统中有多个 ffmpeg，可通过 `FFMPEG_BIN` 指定带 `ass` 和 `subtitles` 滤镜的可执行文件；中文字幕字体可通过 `CJK_FONT_PATH` 指定。
 
@@ -242,6 +251,15 @@ publish_description.txt   # 作品简介和带 # 的话题，可直接粘贴到�
 - 最终简介与话题合计不超过1000个字符，适合直接粘贴到抖音表单；
 - `publish.json` 同时保留不带话题的 `description` 和带话题的 `description_with_hashtags`。
 
+### 清理中间产物
+
+视频渲染的 `frames/` 中间帧目录在编码成功后会自动删除；作为整个流程的最后一步，`publish-copy` 完成时也会兜底清理一次。如果渲染中断或失败后不再重试，可以手动清理：
+
+```bash
+.venv/bin/python main.py cleanup \
+  --dir "output/YYYY-MM-DD/<article-slug>"
+```
+
 ### 完整的逐步执行示例
 
 ```bash
@@ -263,6 +281,9 @@ OUT="output/YYYY-MM-DD/<article-slug>"
 
 # 第五步：生成抖音标题、作品简介和话题
 .venv/bin/python main.py publish-copy --dir "$OUT"
+
+# 可选：清理渲染中断或失败残留的中间帧
+.venv/bin/python main.py cleanup --dir "$OUT"
 ```
 
 ## 输出示例
@@ -275,6 +296,7 @@ output/
         ├── page.json        # 正文、图片原始图注、视频及封面候选
         ├── images.json      # 下载状态和图片原始元数据
         ├── videos.json      # 文章视频资源清单（不下载视频）
+        ├── cover.json       # 封面主图候选（cover_image_index / cover_image_url）
         ├── analysis.json    # 正文的 LLM 分析结果
         ├── image_captions.json # 原始英文图注与精简中文图注映射
         ├── title.txt        # 中文短标题
@@ -286,7 +308,7 @@ output/
         ├── publish.json     # 抖音发布标题、简介和话题
         ├── publish_title.txt # 可直接填写的作品标题
         ├── publish_description.txt # 可直接粘贴的简介和话题
-        └── video.mp4        # 最终视频（1080×1920，9:16）
+        └── <中文标题>.mp4   # 最终视频（1080×1920，9:16），文件名为第二步生成的中文标题
 ```
 
 ## 运行测试

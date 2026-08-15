@@ -1,9 +1,28 @@
 import os
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.video_assembler import assemble_video, find_ffmpeg, get_audio_duration
+from src.video_assembler import (
+    assemble_video,
+    cleanup_frames,
+    find_ffmpeg,
+    get_audio_duration,
+)
+
+
+class TestCleanupFrames:
+    def test_removes_frames_directory(self, tmp_path):
+        frames_dir = tmp_path / "frames"
+        frames_dir.mkdir()
+        (frames_dir / "00000.jpg").write_bytes(b"jpg")
+
+        assert cleanup_frames(str(tmp_path)) is True
+        assert not frames_dir.exists()
+
+    def test_returns_false_when_no_frames_directory(self, tmp_path):
+        assert cleanup_frames(str(tmp_path)) is False
 
 
 class TestFindFfmpeg:
@@ -61,6 +80,7 @@ class TestAssembleVideo:
         result = assemble_video(images, mp3, vtt, output)
 
         assert result == output
+        assert not frames_dir.exists()
         command = mock_run.call_args.args[0]
         assert command[0] == "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
         assert "-framerate" in command
@@ -121,3 +141,34 @@ class TestAssembleVideo:
         assert mock_render_frames.called
         assert mock_duration.called
         assert mock_run.called
+
+    @patch("src.video_assembler.write_ass_from_vtt")
+    @patch("src.video_assembler.find_cjk_font", return_value="/fonts/font.otf")
+    @patch("src.video_assembler.find_ffmpeg", return_value="ffmpeg-full")
+    @patch("src.video_assembler.render_frames")
+    @patch("src.video_assembler.subprocess.run")
+    @patch("src.video_assembler.get_audio_duration", return_value=30.0)
+    def test_keeps_frames_when_ffmpeg_fails(
+        self,
+        mock_duration,
+        mock_run,
+        mock_render_frames,
+        mock_find_ffmpeg,
+        mock_find_font,
+        mock_write_ass,
+        tmp_path,
+    ):
+        mock_run.side_effect = subprocess.CalledProcessError(1, "ffmpeg")
+        frames_dir = tmp_path / "frames"
+        frames_dir.mkdir()
+        mock_render_frames.return_value = (str(frames_dir), 15)
+
+        with pytest.raises(subprocess.CalledProcessError):
+            assemble_video(
+                [str(tmp_path / "img0.jpg"), str(tmp_path / "img1.jpg")],
+                str(tmp_path / "audio.mp3"),
+                str(tmp_path / "audio.vtt"),
+                str(tmp_path / "video.mp4"),
+            )
+
+        assert frames_dir.exists()

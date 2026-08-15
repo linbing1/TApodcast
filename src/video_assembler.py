@@ -84,17 +84,22 @@ def _ass_filter(ass_path: str, font_path: str | None) -> str:
     return filter_value
 
 
+def cleanup_frames(output_dir: str) -> bool:
+    frames_dir = os.path.join(output_dir, "frames")
+    if not os.path.isdir(frames_dir):
+        return False
+    shutil.rmtree(frames_dir, ignore_errors=True)
+    logger.info("Removed intermediate frames directory: %s", frames_dir)
+    return True
+
+
 def assemble_video(
     image_paths: list[str],
     mp3_path: str,
     srt_path: str,
     output_path: str,
-    title: str = "",
-    article_date: str = "",
     image_captions: list[str] | None = None,
 ) -> str:
-    del title, article_date
-
     duration = get_audio_duration(mp3_path)
     output_dir = os.path.dirname(output_path) or "."
     os.makedirs(output_dir, exist_ok=True)
@@ -148,5 +153,6 @@ def assemble_video(
     except subprocess.CalledProcessError as error:
         logger.error("ffmpeg failed:\n%s", error.stderr or "")
         raise
+    cleanup_frames(output_dir)
     logger.info("Video saved to %s", output_path)
     return output_path

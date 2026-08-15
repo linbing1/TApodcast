@@ -321,5 +321,8 @@ def render_frames(
         if i % 100 == 0:
             logger.info("Rendered frame %d/%d (t=%.1fs)", i + 1, total, t)
 
-    logger.info("Rendered %d frames at %dfps", total, _FPS)
+    logger.info(
+        "Rendered %d intermediate frames at %dfps (final video is encoded at 30fps)",
+        total, _FPS,
+    )
     return frames_dir, _FPS

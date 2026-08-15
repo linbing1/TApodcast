@@ -20,7 +20,7 @@ from src.script_writer import write_script
 from src.scraper import download_images as download_image_assets
 from src.scraper import extract_page_content, scrape_article
 from src.tts_generator import generate_tts
-from src.video_assembler import assemble_video
+from src.video_assembler import assemble_video, cleanup_frames
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,11 +59,9 @@ def run_video_only(output_dir: str, title: str = "") -> None:
         raise FileNotFoundError(f"Subtitles not found: {srt_path}")
 
     video_path = os.path.join(output_dir, f"{_safe_title(title) or 'video'}.mp4")
-    article_date = date.today().strftime("%Y年%m月%d日")
     image_captions = load_image_captions(output_dir, image_paths)
     logger.info("Assembling video from %s...", output_dir)
     assemble_video(image_paths, mp3_path, srt_path, video_path,
-                   title=title, article_date=article_date,
                    image_captions=image_captions)
     logger.info("Done! Video: %s", video_path)
 
@@ -96,7 +94,16 @@ def run_publish_only(output_dir: str) -> str:
     result = generate_publish_copy(output_dir, llm)
     logger.info("Publish title: %s", result["title"])
     logger.info("Publish copy saved to %s", os.path.join(output_dir, "publish.json"))
+    cleanup_frames(output_dir)
     return os.path.join(output_dir, "publish.json")
+
+
+def run_cleanup_only(output_dir: str) -> None:
+    logger.info("Cleaning leftover intermediate frames in %s...", output_dir)
+    if cleanup_frames(output_dir):
+        logger.info("Done! Frames directory removed.")
+    else:
+        logger.info("No frames directory found, nothing to clean.")
 
 
 async def run(url: str, skip_video: bool = False) -> None:
@@ -143,10 +150,8 @@ async def run(url: str, skip_video: bool = False) -> None:
 
     logger.info("Step 3: Assembling the vertical video with burned-in subtitles...")
     video_path = os.path.join(output_dir, f"{_safe_title(analyzed.title_cn)}.mp4")
-    article_date = date.today().strftime("%Y年%m月%d日")
     image_captions = load_image_captions(output_dir, article.image_paths)
     assemble_video(article.image_paths, mp3_path, srt_path, video_path,
-                   title=analyzed.title_cn, article_date=article_date,
                    image_captions=image_captions)
 
     logger.info("Done! Video: %s", video_path)
@@ -306,6 +311,12 @@ def main() -> None:
     )
     audio.add_argument("--dir", required=True, help="Directory containing page.json")
 
+    clean = sub.add_parser(
+        "cleanup",
+        help="Remove leftover intermediate frames directory",
+    )
+    clean.add_argument("--dir", required=True, help="Output directory of the article")
+
     # Backwards-compatible: no subcommand → treat as 'run'
     parser.add_argument("--url", help=argparse.SUPPRESS)
     parser.add_argument("--skip-video", action="store_true", help=argparse.SUPPRESS)
@@ -325,6 +336,8 @@ def main() -> None:
         )
     elif args.cmd in ("publish-copy", "publish"):
         run_publish_only(args.dir)
+    elif args.cmd == "cleanup":
+        run_cleanup_only(args.dir)
     elif args.cmd == "extract":
         asyncio.run(extract(args.url, output_dir=args.dir))
     elif args.cmd == "download-images":
