@@ -140,6 +140,55 @@ def test_generate_cover_prefers_shared_title_file(tmp_path, monkeypatch):
     assert captured["title"] == "统一的封面和发布标题"
 
 
+def test_generate_cover_landscape_writes_horizontal_png(tmp_path, monkeypatch):
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    Image.new("RGB", (1200, 800), "#164d75").save(image_dir / "000.jpg")
+    Image.new("RGB", (800, 1200), "#875522").save(image_dir / "001.jpg")
+    (tmp_path / "title.txt").write_text("枪手签下领袖吉马良斯", encoding="utf-8")
+    (tmp_path / "page.json").write_text(
+        '{"cover_image_index": 1, "cover_image_url": "https://example.com/001.jpg"}',
+        encoding="utf-8",
+    )
+
+    font = ImageFontForTest()
+    monkeypatch.setattr(cover_renderer, "find_cjk_font", lambda: str(font.path))
+    monkeypatch.setattr(cover_renderer.ImageFont, "truetype", lambda *args, **kwargs: font.font)
+
+    output = cover_renderer.generate_cover_landscape(str(tmp_path))
+
+    assert output == str(tmp_path / "cover-landscape.png")
+    assert Path(output).exists()
+    assert Image.open(output).size == (1920, 1080)
+
+
+def test_generate_cover_landscape_uses_same_inputs_as_vertical(tmp_path, monkeypatch):
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    Image.new("RGB", (1200, 800), "#164d75").save(image_dir / "000.jpg")
+    (tmp_path / "title.txt").write_text("统一的封面标题", encoding="utf-8")
+
+    captured = {}
+
+    def fake_render_cover_landscape(**kwargs):
+        captured.update(kwargs)
+        return kwargs["output_path"]
+
+    monkeypatch.setattr(cover_renderer, "render_cover_landscape", fake_render_cover_landscape)
+
+    cover_renderer.generate_cover_landscape(
+        str(tmp_path),
+        image_index=0,
+        kicker="英超转会",
+        output_name="wide.png",
+    )
+
+    assert captured["title"] == "统一的封面标题"
+    assert captured["image_path"] == str(image_dir / "000.jpg")
+    assert captured["kicker"] == "英超转会"
+    assert captured["output_path"] == str(tmp_path / "wide.png")
+
+
 class ImageFontForTest:
     def __init__(self):
         from PIL import ImageFont

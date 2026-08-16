@@ -18,7 +18,7 @@
 | 第一步：内容解析 | The Athletic 文章 URL | 提取主要文字、图片、原始图注和视频清单，分离图注与署名，确定封面主图并下载图片 | `page.json`、`text.txt`、`images/`、`images.json`、`videos.json`、`cover.json` |
 | 第二步：LLM + TTS | `page.json`、`images.json` | 分析正文，将英文图片说明翻译并精简为中文，生成中文播报稿、约三分钟配音和时间字幕 | `analysis.json`、`image_captions.json`、`title.txt`、`script.txt`、`audio.mp3`、`audio.vtt` |
 | 第三步：视频合成 | `images/`、`image_captions.json`、`audio.mp3`、`audio.vtt` | 按图片路径匹配中文图注，生成图片轮播并烧录黄色口播字幕 | `subtitles.ass`、`<中文标题>.mp4` |
-| 第四步：封面生成 | 封面主图和 `title.txt` | 生成带栏目标签、当前日期和中文标题的独立竖屏封面 | `cover.png` |
+| 第四步：封面生成 | 封面主图和 `title.txt` | 生成带栏目标签、当前日期和中文标题的竖版与横版独立封面 | `cover.png`、`cover-landscape.png` |
 | 第五步：发布文案 | `page.json`、`analysis.json`、`script.txt`、`title.txt` | 整理不超过30字的抖音标题，并生成作品简介和相关话题 | `publish.json`、`publish_title.txt`、`publish_description.txt` |
 
 ## 环境要求
@@ -180,7 +180,7 @@ audio.vtt            # TTS 时间字幕
 
 ### 第四步：生成抖音封面
 
-封面独立于视频生成，默认读取 `title.txt` 和第一步解析得到的封面候选，从 `images/` 生成 `1080×1920` 的 `cover.png`：
+封面独立于视频生成，默认读取 `title.txt` 和第一步解析得到的封面候选，从 `images/` 生成 `1080×1920` 的竖版 `cover.png` 和 `1920×1080` 的横版 `cover-landscape.png`：
 
 ```bash
 .venv/bin/python main.py cover \
@@ -205,15 +205,21 @@ audio.vtt            # TTS 时间字幕
 - `--title`：主标题，省略时读取 `title.txt`；
 - `--kicker`：标题上方的小标签；
 - `--subtitle`：标题下方的辅助说明，可省略；
-- `--output`：输出文件名，默认 `cover.png`。
+- `--output`：竖版输出文件名，默认 `cover.png`；横版文件名自动在词干后加 `-landscape`，如 `cover-v1.png` 对应 `cover-v1-landscape.png`；
+- `--orientation`：`both`（默认，同时生成竖版和横版）、`vertical`（仅竖版）或 `landscape`（仅横版）。
 
-当前封面版式固定包含：
+竖版封面（`1080×1920`）版式固定包含：
 
-- 左上角黄色栏目标签；
-- 右上角自动生成的当前日期，格式为 `YYYY.MM.DD`；
-- 日期默认使用黄色 DIN Condensed Bold，可通过 `COVER_DATE_FONT_PATH` 指定其他字体；
+- 主图上方左侧的黄色栏目标签和右侧当前日期，与主图保持固定间距；
+- 日期格式为 `YYYY.MM.DD`，默认使用黄色 DIN Condensed Bold，可通过 `COVER_DATE_FONT_PATH` 指定其他字体；
 - 中部文章主图；
 - 下方中文主标题和 `英超每日观察` 品牌文字。
+
+横版封面（`1920×1080`）版式固定包含：
+
+- 同一张主图全幅铺底，上下叠加渐变压暗保证文字可读；
+- 顶部左侧栏目标签（上方带黄色装饰条）和右侧当前日期，与竖版样式一致；
+- 底部左对齐中文主标题（首行白色、第二行黄色）和 `英超每日观察` 品牌文字。
 
 封面标题读取 `title.txt`。该标题由第二步的 LLM 生成，限制为不超过30个汉字，并同时作为第五步的抖音作品标题。这样封面标题和发布页标题保持一致。
 
@@ -304,7 +310,8 @@ output/
         ├── audio.mp3        # TTS 生成的音频
         ├── audio.vtt        # 字幕文件
         ├── subtitles.ass    # FFmpeg/libass 使用的烧录字幕
-        ├── cover.png        # 抖音封面
+        ├── cover.png        # 抖音竖版封面（1080×1920）
+        ├── cover-landscape.png # 横版封面（1920×1080）
         ├── publish.json     # 抖音发布标题、简介和话题
         ├── publish_title.txt # 可直接填写的作品标题
         ├── publish_description.txt # 可直接粘贴的简介和话题

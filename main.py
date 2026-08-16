@@ -7,11 +7,12 @@ import os
 import re
 from dataclasses import asdict
 from datetime import date
+from pathlib import Path
 from urllib.parse import urlparse
 
 from src.analyzer import analyze_article
 from src.config import get_config
-from src.cover_renderer import generate_cover
+from src.cover_renderer import generate_cover, generate_cover_landscape
 from src.image_captioner import generate_image_captions, load_image_captions
 from src.llm import LLMClient
 from src.models import ImageAsset, ScrapedArticle
@@ -73,18 +74,32 @@ def run_cover_only(
     kicker: str = "英超新闻 · 深度报道",
     subtitle: str = "",
     output_name: str = "cover.png",
-) -> str:
+    orientation: str = "both",
+) -> list[str]:
     logger.info("Generating cover from %s...", output_dir)
-    cover_path = generate_cover(
-        output_dir=output_dir,
-        title=title,
-        image_index=image_index,
-        kicker=kicker,
-        subtitle=subtitle,
-        output_name=output_name,
-    )
-    logger.info("Done! Cover: %s", cover_path)
-    return cover_path
+    cover_paths: list[str] = []
+    if orientation in ("both", "vertical"):
+        cover_paths.append(generate_cover(
+            output_dir=output_dir,
+            title=title,
+            image_index=image_index,
+            kicker=kicker,
+            subtitle=subtitle,
+            output_name=output_name,
+        ))
+    if orientation in ("both", "landscape"):
+        landscape_name = f"{Path(output_name).stem}-landscape.png"
+        cover_paths.append(generate_cover_landscape(
+            output_dir=output_dir,
+            title=title,
+            image_index=image_index,
+            kicker=kicker,
+            subtitle=subtitle,
+            output_name=landscape_name,
+        ))
+    for cover_path in cover_paths:
+        logger.info("Done! Cover: %s", cover_path)
+    return cover_paths
 
 
 def run_publish_only(output_dir: str) -> str:
@@ -290,6 +305,12 @@ def main() -> None:
     cover.add_argument("--kicker", default="英超新闻 · 深度报道", help="Small label above the title")
     cover.add_argument("--subtitle", default="", help="Optional supporting line below the title")
     cover.add_argument("--output", default="cover.png", help="Output filename inside --dir")
+    cover.add_argument(
+        "--orientation",
+        choices=["both", "vertical", "landscape"],
+        default="both",
+        help="Generate vertical cover.png, landscape cover-landscape.png, or both",
+    )
 
     publish = sub.add_parser(
         "publish-copy",
@@ -333,6 +354,7 @@ def main() -> None:
             kicker=args.kicker,
             subtitle=args.subtitle,
             output_name=args.output,
+            orientation=args.orientation,
         )
     elif args.cmd in ("publish-copy", "publish"):
         run_publish_only(args.dir)
