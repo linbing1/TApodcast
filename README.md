@@ -64,16 +64,47 @@ Cookie 导出推荐使用 [Cookie-Editor](https://cookie-editor.com/) 浏览器�
 - 脚本、定时任务、CI 等非交互 shell 不会自动加载 `~/.zshrc`，需要在命令前显式注入变量，例如 `LLM_API_KEY=... .venv/bin/python main.py ...`；
 - `LLM_API_KEY` 缺失时会在构造 LLM 客户端时直接报错退出；`ATHLETIC_COOKIES` 缺失、为空数组或不是合法 JSON 时同样会在启动时直接报错退出。
 
+## 环境预检
+
+正式处理文章前，可以运行 `doctor` 一次性检查 Python、Cookie 配置、LLM 配置、TTS 配置、输出目录、磁盘空间、Playwright Chromium、FFmpeg/libass 和中文字体：
+
+```bash
+.venv/bin/python main.py doctor
+```
+
+指定其他输出目录进行写入权限和磁盘检查：
+
+```bash
+.venv/bin/python main.py doctor --output-dir "/path/to/output"
+```
+
+增加在线检查，实际验证 LLM API 和 Edge TTS 服务是否可连接：
+
+```bash
+.venv/bin/python main.py doctor --online
+```
+
+也可以提供一篇 The Athletic 文章，验证 Cookie 登录状态和完整正文抽取能力：
+
+```bash
+.venv/bin/python main.py doctor \
+  --url "https://www.nytimes.com/athletic/ARTICLE_ID/..."
+```
+
+在线检查和文章检查可以同时使用。所有检查都会输出 `PASS`、`WARN` 或 `FAIL`；只要存在 `FAIL`，命令就以非零状态码退出，适合用于脚本、定时任务和 CI 的运行前检查。
+
 ## 快速使用
 
-下面的命令会连续执行第一至第三步，生成视频，但不会自动生成第四步的封面或第五步的发布文案：
+下面的命令会连续执行全部五步，生成视频、竖横封面和发布文案：
 
 ```bash
 .venv/bin/python main.py run \
   --url "https://www.nytimes.com/athletic/ARTICLE_ID/..."
 ```
 
-输出文件保存在 `output/YYYY-MM-DD/<article-slug>/`，其中日期是**运行当天的日期**，不是文章发布日期。注意 `run` 没有断点续跑逻辑：重新执行会重新抓取页面并重新调用 LLM，如果中途失败，建议改用下文的分步骤命令从断点继续；`run --skip-video` 可以在 TTS 完成后停止，跳过视频合成。视频完成后执行第四步：
+输出文件保存在 `output/YYYY-MM-DD/<article-slug>/`，其中日期是**运行当天的日期**，不是文章发布日期。完整流程和分步骤命令使用同一套 Pipeline Runner，并在输出目录写入 `manifest.json`，记录每个阶段的状态、耗时、输入输出哈希、运行配置和提示词版本。`run --skip-video` 等价于运行到 `generate-audio` 阶段后停止。
+
+封面和发布文案也可以单独重新生成：
 
 ```bash
 .venv/bin/python main.py cover \
@@ -86,6 +117,47 @@ Cookie 导出推荐使用 [Cookie-Editor](https://cookie-editor.com/) 浏览器�
 .venv/bin/python main.py publish-copy \
   --dir "output/YYYY-MM-DD/<article-slug>"
 ```
+
+### 断点续跑和阶段控制
+
+建议通过 `--dir` 固定文章输出目录，这样即使跨天重试，也会继续使用同一个 `manifest.json`：
+
+```bash
+URL="https://www.nytimes.com/athletic/ARTICLE_ID/..."
+OUT="output/YYYY-MM-DD/<article-slug>"
+
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" --resume
+```
+
+`--resume` 只跳过状态为 `completed`，且输入、输出文件哈希均未变化的阶段。输出缺失、文件被修改或上游输入发生变化时，对应阶段会自动重新执行。
+
+可以限制执行范围：
+
+```bash
+# 从音频阶段开始，并运行到视频阶段
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" \
+  --from generate-audio --to video
+
+# 只运行正文和素材解析
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" --to extract
+```
+
+可以在断点续跑时强制重跑指定阶段；`--force` 可以重复使用：
+
+```bash
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" --resume \
+  --force generate-audio --force video
+```
+
+执行前查看计划而不修改文件：
+
+```bash
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" --resume --dry-run
+```
+
+当前可用阶段名为：`extract`、`download-images`、`generate-audio`、`video`、`cover`、`publish-copy`。单独执行这些分步骤命令时也会更新同一个 `manifest.json`。
+
+结构化 JSON 产物使用 Pydantic 数据契约并带有 `schema_version`。旧版数组格式的 `images.json`、`videos.json` 和 `image_captions.json` 仍可读取；`manifest.json` 会从 schema v1 自动迁移到 v2。所有 JSON 和关键文本产物均采用临时文件加原子替换的方式写入。
 
 ## 分步骤执行
 
@@ -299,6 +371,7 @@ output/
 └── 2026-08-11/
     └── liverpool-transfer-summer-window-analysis/
         ├── images/          # 从文章下载的图片
+        ├── manifest.json    # 流程阶段状态、耗时和输入输出哈希
         ├── page.json        # 正文、图片原始图注、视频及封面候选
         ├── images.json      # 下载状态和图片原始元数据
         ├── videos.json      # 文章视频资源清单（不下载视频）

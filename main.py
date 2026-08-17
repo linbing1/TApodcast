@@ -1,25 +1,37 @@
 import argparse
 import asyncio
 import glob
-import json
 import logging
 import os
 import re
-from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlparse
 
+from src.analyzer import PROMPT_VERSION as ANALYZER_PROMPT_VERSION
 from src.analyzer import analyze_article
+from src.artifacts import load_page_content, write_artifact
 from src.config import get_config
 from src.cover_renderer import generate_cover, generate_cover_landscape
+from src.doctor import format_doctor_report, run_doctor_checks
+from src.image_captioner import PROMPT_VERSION as IMAGE_CAPTION_PROMPT_VERSION
 from src.image_captioner import generate_image_captions, load_image_captions
 from src.llm import LLMClient
-from src.models import ImageAsset, ScrapedArticle
+from src.models import (
+    CoverManifest,
+    ImageManifest,
+    ImageRecord,
+    ScrapedArticle,
+    VideoManifest,
+)
+from src.pipeline import PipelineContext, PipelineRunner, PipelineStep
+from src.publish_copy import PROMPT_VERSION as PUBLISH_PROMPT_VERSION
 from src.publish_copy import generate_publish_copy
+from src.script_writer import PROMPT_VERSION as SCRIPT_PROMPT_VERSION
 from src.script_writer import write_script
 from src.scraper import download_images as download_image_assets
-from src.scraper import extract_page_content, scrape_article
+from src.scraper import extract_page_content
+from src.storage import atomic_write_text
 from src.tts_generator import generate_tts
 from src.video_assembler import assemble_video, cleanup_frames
 
@@ -28,6 +40,15 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+PIPELINE_STEP_NAMES = (
+    "extract",
+    "download-images",
+    "generate-audio",
+    "video",
+    "cover",
+    "publish-copy",
+)
 
 
 def _article_slug(url: str) -> str:
@@ -39,6 +60,10 @@ def _article_slug(url: str) -> str:
 
 def _safe_title(title: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:40]
+
+
+def _default_output_dir(url: str) -> str:
+    return os.path.join("output", str(date.today()), _article_slug(url))
 
 
 def run_video_only(output_dir: str, title: str = "") -> None:
@@ -121,74 +146,76 @@ def run_cleanup_only(output_dir: str) -> None:
         logger.info("No frames directory found, nothing to clean.")
 
 
-async def run(url: str, skip_video: bool = False) -> None:
-    config = get_config()
-    slug = _article_slug(url)
-    output_dir = os.path.join("output", str(date.today()), slug)
-    os.makedirs(output_dir, exist_ok=True)
+async def run_doctor(
+    output_dir: str = "output",
+    online: bool = False,
+    article_url: str = "",
+) -> bool:
+    report = await run_doctor_checks(
+        output_dir=output_dir,
+        online=online,
+        article_url=article_url,
+    )
+    print(format_doctor_report(report))
+    return report.passed
+
+
+async def run(
+    url: str,
+    skip_video: bool = False,
+    output_dir: str = "",
+    resume: bool = False,
+    from_step: str | None = None,
+    to_step: str | None = None,
+    force_steps: set[str] | None = None,
+    dry_run: bool = False,
+) -> str:
+    output_dir = output_dir or _default_output_dir(url)
     logger.info("Output directory: %s", output_dir)
 
-    logger.info("Step 1: Extracting article content and downloading images...")
-    article = await scrape_article(url, config["athletic_cookies"], output_dir)
-    logger.info("Scraped %d chars text, %d images", len(article.full_text), len(article.image_paths))
-
-    llm = LLMClient(config["llm_base_url"], config["llm_api_key"], config["llm_model"])
-
-    logger.info("Step 2.1: Analyzing article with LLM...")
-    analyzed = analyze_article(article, llm)
-    logger.info("Analysis complete: %s", analyzed.title_cn)
-    with open(os.path.join(output_dir, "analysis.json"), "w", encoding="utf-8") as f:
-        json.dump(asdict(analyzed), f, ensure_ascii=False, indent=2)
-    with open(os.path.join(output_dir, "title.txt"), "w", encoding="utf-8") as f:
-        f.write(analyzed.title_cn)
-
-    logger.info("Step 2.2: Translating and shortening image captions with LLM...")
-    generate_image_captions(output_dir, llm)
-
-    logger.info("Step 2.3: Writing podcast script with LLM...")
-    today = date.today()
-    speech_date = f"{today.year}年{today.month}月{today.day}日"
-    script = write_script(analyzed, llm, date_str=speech_date)
-    logger.info("Script: %d chars", len(script.text))
-
-    script_path = os.path.join(output_dir, "script.txt")
-    with open(script_path, "w", encoding="utf-8") as f:
-        f.write(script.text)
-    logger.info("Script saved to %s", script_path)
-
-    logger.info("Step 2.4: Generating audio and VTT subtitles with edge-tts...")
-    mp3_path, srt_path = await generate_tts(script, config["tts_voice"], output_dir, config["tts_rate"])
-
     if skip_video:
-        logger.info("--skip-video: done. Output: %s", output_dir)
-        return
+        if to_step == "video":
+            raise ValueError("--skip-video cannot be combined with --to video")
+        to_step = to_step or "generate-audio"
 
-    logger.info("Step 3: Assembling the vertical video with burned-in subtitles...")
-    video_path = os.path.join(output_dir, f"{_safe_title(analyzed.title_cn)}.mp4")
-    image_captions = load_image_captions(output_dir, article.image_paths)
-    assemble_video(article.image_paths, mp3_path, srt_path, video_path,
-                   image_captions=image_captions)
-
-    logger.info("Done! Video: %s", video_path)
+    context = PipelineContext(
+        article_url=url,
+        output_dir=output_dir,
+        configuration=_pipeline_configuration(),
+        prompt_versions=_prompt_versions(),
+    )
+    runner = _build_pipeline_runner(context)
+    await runner.run(
+        resume=resume,
+        from_step=from_step,
+        to_step=to_step,
+        force_steps=force_steps,
+        dry_run=dry_run,
+    )
+    logger.info("Done! Output: %s", output_dir)
+    return output_dir
 
 
 async def extract(url: str, output_dir: str = "") -> str:
     config = get_config()
     if not output_dir:
-        output_dir = os.path.join("output", str(date.today()), _article_slug(url))
+        output_dir = _default_output_dir(url)
     os.makedirs(output_dir, exist_ok=True)
     logger.info("Extracting page content: %s", url)
 
     content = await extract_page_content(url, config["athletic_cookies"])
-    content_data = asdict(content)
-    with open(os.path.join(output_dir, "page.json"), "w", encoding="utf-8") as f:
-        json.dump(content_data, f, ensure_ascii=False, indent=2)
-    with open(os.path.join(output_dir, "text.txt"), "w", encoding="utf-8") as f:
-        f.write(content.main_text)
-    with open(os.path.join(output_dir, "images.json"), "w", encoding="utf-8") as f:
-        json.dump(content_data["images"], f, ensure_ascii=False, indent=2)
-    with open(os.path.join(output_dir, "videos.json"), "w", encoding="utf-8") as f:
-        json.dump(content_data["videos"], f, ensure_ascii=False, indent=2)
+    write_artifact(os.path.join(output_dir, "page.json"), content)
+    atomic_write_text(os.path.join(output_dir, "text.txt"), content.main_text)
+    write_artifact(
+        os.path.join(output_dir, "images.json"),
+        ImageManifest(
+            images=[ImageRecord(**image.model_dump()) for image in content.images]
+        ),
+    )
+    write_artifact(
+        os.path.join(output_dir, "videos.json"),
+        VideoManifest(videos=content.videos),
+    )
 
     logger.info(
         "Extracted %d chars, %d images, %d videos",
@@ -204,33 +231,41 @@ async def download_images_command(output_dir: str) -> str:
     if not os.path.exists(page_path):
         raise FileNotFoundError(f"Page manifest not found: {page_path}")
 
-    with open(page_path, encoding="utf-8") as f:
-        page_data = json.load(f)
-    images = [
-        ImageAsset(
-            url=item["url"],
-            alt=item.get("alt", ""),
-            caption=item.get("caption", ""),
-            credit=item.get("credit", ""),
-            width=item.get("width"),
-            height=item.get("height"),
-        )
-        for item in page_data.get("images", [])
-    ]
+    page = load_page_content(page_path)
+    images = page.images
     if not images:
         raise ValueError(f"No images listed in page manifest: {page_path}")
 
     records = await download_image_assets(
         images,
         output_dir,
-        referer=page_data.get("url", ""),
+        referer=page.url,
         cookies=config["athletic_cookies"],
-        cover_image_index=page_data.get("cover_image_index"),
+        cover_image_index=page.cover_image_index,
     )
-    with open(os.path.join(output_dir, "images.json"), "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+    write_artifact(
+        os.path.join(output_dir, "images.json"),
+        ImageManifest(images=[ImageRecord.model_validate(record) for record in records]),
+    )
+
+    cover_index = page.cover_image_index
+    cover_local_path = None
+    if isinstance(cover_index, int) and 0 <= cover_index < len(records):
+        cover_record = records[cover_index]
+        if cover_record["status"] == "downloaded":
+            cover_local_path = cover_record["local_path"]
+    write_artifact(
+        os.path.join(output_dir, "cover.json"),
+        CoverManifest(
+            image_index=cover_index,
+            image_url=page.cover_image_url,
+            local_path=cover_local_path,
+        ),
+    )
 
     downloaded = sum(record["status"] == "downloaded" for record in records)
+    if downloaded == 0:
+        raise ValueError(f"Failed to download any images listed in: {page_path}")
     logger.info("Image download result: %d/%d succeeded", downloaded, len(records))
     logger.info("Image output: %s", os.path.join(output_dir, "images"))
     return output_dir
@@ -242,26 +277,22 @@ async def generate_audio(output_dir: str) -> str:
     if not os.path.exists(page_path):
         raise FileNotFoundError(f"Page manifest not found: {page_path}")
 
-    with open(page_path, encoding="utf-8") as f:
-        page_data = json.load(f)
-
-    main_text = page_data.get("main_text", "").strip()
+    page = load_page_content(page_path)
+    main_text = page.main_text.strip()
     if not main_text:
         raise ValueError(f"No article text found in page manifest: {page_path}")
 
     article = ScrapedArticle(
-        title=page_data.get("title", "").strip(),
-        link=page_data.get("url", ""),
+        title=page.title.strip(),
+        link=page.url,
         full_text=main_text,
     )
     llm = LLMClient(config["llm_base_url"], config["llm_api_key"], config["llm_model"])
 
     logger.info("Step 2.1: Analyzing article with LLM...")
     analyzed = analyze_article(article, llm)
-    with open(os.path.join(output_dir, "analysis.json"), "w", encoding="utf-8") as f:
-        json.dump(asdict(analyzed), f, ensure_ascii=False, indent=2)
-    with open(os.path.join(output_dir, "title.txt"), "w", encoding="utf-8") as f:
-        f.write(analyzed.title_cn)
+    write_artifact(os.path.join(output_dir, "analysis.json"), analyzed)
+    atomic_write_text(os.path.join(output_dir, "title.txt"), analyzed.title_cn)
 
     logger.info("Step 2.2: Translating and shortening image captions with LLM...")
     generate_image_captions(output_dir, llm)
@@ -270,8 +301,7 @@ async def generate_audio(output_dir: str) -> str:
     today = date.today()
     speech_date = f"{today.year}年{today.month}月{today.day}日"
     script = write_script(analyzed, llm, date_str=speech_date)
-    with open(os.path.join(output_dir, "script.txt"), "w", encoding="utf-8") as f:
-        f.write(script.text)
+    atomic_write_text(os.path.join(output_dir, "script.txt"), script.text)
 
     logger.info("Step 2.4: Generating audio with edge-tts...")
     mp3_path, vtt_path = await generate_tts(
@@ -284,6 +314,184 @@ async def generate_audio(output_dir: str) -> str:
     return output_dir
 
 
+def _static_paths(*relative_paths: str):
+    def resolve_paths(_: PipelineContext) -> list[str]:
+        return list(relative_paths)
+
+    return resolve_paths
+
+
+async def _pipeline_extract(context: PipelineContext) -> None:
+    await extract(context.article_url, output_dir=context.output_dir)
+
+
+async def _pipeline_download_images(context: PipelineContext) -> None:
+    await download_images_command(context.output_dir)
+
+
+async def _pipeline_generate_audio(context: PipelineContext) -> None:
+    await generate_audio(context.output_dir)
+
+
+def _pipeline_video(context: PipelineContext) -> None:
+    run_video_only(context.output_dir, title=context.video_title)
+
+
+def _pipeline_cover(context: PipelineContext) -> None:
+    run_cover_only(
+        context.output_dir,
+        title=context.cover_title,
+        image_index=context.cover_image_index,
+        kicker=context.cover_kicker,
+        subtitle=context.cover_subtitle,
+        output_name=context.cover_output_name,
+        orientation=context.cover_orientation,
+    )
+
+
+def _pipeline_publish(context: PipelineContext) -> None:
+    run_publish_only(context.output_dir)
+
+
+def _video_output_paths(context: PipelineContext) -> list[str]:
+    title = context.video_title
+    if not title:
+        title_path = Path(context.output_dir) / "title.txt"
+        title = title_path.read_text(encoding="utf-8").strip()
+    return [f"{_safe_title(title) or 'video'}.mp4", "subtitles.ass"]
+
+
+def _cover_output_paths(context: PipelineContext) -> list[str]:
+    paths = []
+    if context.cover_orientation in ("both", "vertical"):
+        paths.append(context.cover_output_name)
+    if context.cover_orientation in ("both", "landscape"):
+        paths.append(f"{Path(context.cover_output_name).stem}-landscape.png")
+    return paths
+
+
+def _pipeline_configuration() -> dict[str, str]:
+    return {
+        "llm_base_url": os.environ.get("LLM_BASE_URL", "https://api.deepseek.com/v1"),
+        "llm_model": os.environ.get("LLM_MODEL", "deepseek-v4-flash"),
+        "tts_voice": os.environ.get("TTS_VOICE", "zh-CN-YunjianNeural"),
+        "tts_rate": os.environ.get("TTS_RATE", "+10%"),
+    }
+
+
+def _prompt_versions() -> dict[str, str]:
+    return {
+        "analyzer": ANALYZER_PROMPT_VERSION,
+        "image_captioner": IMAGE_CAPTION_PROMPT_VERSION,
+        "script_writer": SCRIPT_PROMPT_VERSION,
+        "publish_copy": PUBLISH_PROMPT_VERSION,
+    }
+
+
+def _build_pipeline_runner(context: PipelineContext) -> PipelineRunner:
+    steps = [
+        PipelineStep(
+            name="extract",
+            action=_pipeline_extract,
+            inputs=_static_paths(),
+            outputs=_static_paths("page.json", "text.txt", "videos.json"),
+        ),
+        PipelineStep(
+            name="download-images",
+            action=_pipeline_download_images,
+            inputs=_static_paths("page.json"),
+            outputs=_static_paths("images.json", "cover.json", "images"),
+        ),
+        PipelineStep(
+            name="generate-audio",
+            action=_pipeline_generate_audio,
+            inputs=_static_paths("page.json", "images.json"),
+            outputs=_static_paths(
+                "analysis.json",
+                "image_captions.json",
+                "title.txt",
+                "script.txt",
+                "audio.mp3",
+                "audio.vtt",
+            ),
+        ),
+        PipelineStep(
+            name="video",
+            action=_pipeline_video,
+            inputs=_static_paths(
+                "images",
+                "image_captions.json",
+                "title.txt",
+                "audio.mp3",
+                "audio.vtt",
+            ),
+            outputs=_video_output_paths,
+        ),
+        PipelineStep(
+            name="cover",
+            action=_pipeline_cover,
+            inputs=_static_paths("images", "cover.json", "title.txt"),
+            outputs=_cover_output_paths,
+        ),
+        PipelineStep(
+            name="publish-copy",
+            action=_pipeline_publish,
+            inputs=_static_paths("page.json", "analysis.json", "script.txt", "title.txt"),
+            outputs=_static_paths(
+                "publish.json",
+                "publish_title.txt",
+                "publish_description.txt",
+            ),
+        ),
+    ]
+    return PipelineRunner(context, steps)
+
+
+def _article_url_from_output(output_dir: str) -> str:
+    page_path = Path(output_dir) / "page.json"
+    if not page_path.exists():
+        return ""
+    return load_page_content(page_path).url
+
+
+async def run_pipeline_step(
+    step_name: str,
+    output_dir: str,
+    *,
+    article_url: str = "",
+    video_title: str = "",
+    cover_title: str = "",
+    cover_image_index: int | None = None,
+    cover_kicker: str = "英超新闻 · 深度报道",
+    cover_subtitle: str = "",
+    cover_output_name: str = "cover.png",
+    cover_orientation: str = "both",
+) -> str:
+    if step_name not in PIPELINE_STEP_NAMES:
+        raise ValueError(f"Unknown pipeline step: {step_name}")
+    if step_name == "extract":
+        if not article_url:
+            raise ValueError("The extract step requires an article URL")
+        output_dir = output_dir or _default_output_dir(article_url)
+    resolved_url = article_url or _article_url_from_output(output_dir)
+    context = PipelineContext(
+        article_url=resolved_url,
+        output_dir=output_dir,
+        video_title=video_title,
+        cover_title=cover_title,
+        cover_image_index=cover_image_index,
+        cover_kicker=cover_kicker,
+        cover_subtitle=cover_subtitle,
+        cover_output_name=cover_output_name,
+        cover_orientation=cover_orientation,
+        configuration=_pipeline_configuration(),
+        prompt_versions=_prompt_versions(),
+    )
+    runner = _build_pipeline_runner(context)
+    await runner.run(from_step=step_name, to_step=step_name)
+    return output_dir
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate a Douyin short video from a The Athletic article"
@@ -292,7 +500,42 @@ def main() -> None:
 
     full = sub.add_parser("run", help="Full pipeline from URL")
     full.add_argument("--url", required=True, help="The Athletic article URL")
+    full.add_argument(
+        "--dir",
+        default="",
+        help="Output directory (defaults to output/date/article-slug)",
+    )
     full.add_argument("--skip-video", action="store_true", help="Stop after TTS, skip video assembly")
+    full.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip completed steps whose inputs and outputs are unchanged",
+    )
+    full.add_argument(
+        "--from",
+        dest="from_step",
+        choices=PIPELINE_STEP_NAMES,
+        help="Start from this pipeline step",
+    )
+    full.add_argument(
+        "--to",
+        dest="to_step",
+        choices=PIPELINE_STEP_NAMES,
+        help="Stop after this pipeline step",
+    )
+    full.add_argument(
+        "--force",
+        dest="force_steps",
+        action="append",
+        choices=PIPELINE_STEP_NAMES,
+        default=[],
+        help="Force a pipeline step to run; may be repeated",
+    )
+    full.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show which pipeline steps would run without changing files",
+    )
 
     vid = sub.add_parser("video", help="Assemble video from existing output directory")
     vid.add_argument("--dir", required=True, help="Output directory containing images/, audio.mp3, audio.vtt")
@@ -338,6 +581,26 @@ def main() -> None:
     )
     clean.add_argument("--dir", required=True, help="Output directory of the article")
 
+    doctor = sub.add_parser(
+        "doctor",
+        help="Check configuration and runtime dependencies",
+    )
+    doctor.add_argument(
+        "--output-dir",
+        default="output",
+        help="Output directory or parent path to check for write access and free space",
+    )
+    doctor.add_argument(
+        "--online",
+        action="store_true",
+        help="Also verify live LLM and TTS connectivity",
+    )
+    doctor.add_argument(
+        "--url",
+        default="",
+        help="Optionally verify authenticated extraction of a The Athletic article",
+    )
+
     # Backwards-compatible: no subcommand → treat as 'run'
     parser.add_argument("--url", help=argparse.SUPPRESS)
     parser.add_argument("--skip-video", action="store_true", help=argparse.SUPPRESS)
@@ -345,32 +608,68 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.cmd == "video":
-        run_video_only(args.dir, title=args.title)
+        asyncio.run(
+            run_pipeline_step(
+                "video",
+                args.dir,
+                video_title=args.title,
+            )
+        )
     elif args.cmd == "cover":
-        run_cover_only(
-            args.dir,
-            title=args.title,
-            image_index=args.image_index,
-            kicker=args.kicker,
-            subtitle=args.subtitle,
-            output_name=args.output,
-            orientation=args.orientation,
+        asyncio.run(
+            run_pipeline_step(
+                "cover",
+                args.dir,
+                cover_title=args.title,
+                cover_image_index=args.image_index,
+                cover_kicker=args.kicker,
+                cover_subtitle=args.subtitle,
+                cover_output_name=args.output,
+                cover_orientation=args.orientation,
+            )
         )
     elif args.cmd in ("publish-copy", "publish"):
-        run_publish_only(args.dir)
+        asyncio.run(run_pipeline_step("publish-copy", args.dir))
     elif args.cmd == "cleanup":
         run_cleanup_only(args.dir)
+    elif args.cmd == "doctor":
+        passed = asyncio.run(
+            run_doctor(
+                output_dir=args.output_dir,
+                online=args.online,
+                article_url=args.url,
+            )
+        )
+        if not passed:
+            raise SystemExit(1)
     elif args.cmd == "extract":
-        asyncio.run(extract(args.url, output_dir=args.dir))
+        asyncio.run(
+            run_pipeline_step(
+                "extract",
+                args.dir,
+                article_url=args.url,
+            )
+        )
     elif args.cmd == "download-images":
-        asyncio.run(download_images_command(args.dir))
+        asyncio.run(run_pipeline_step("download-images", args.dir))
     elif args.cmd == "generate-audio":
-        asyncio.run(generate_audio(args.dir))
+        asyncio.run(run_pipeline_step("generate-audio", args.dir))
     else:
         if not args.url:
             parser.print_help()
             return
-        asyncio.run(run(args.url, skip_video=args.skip_video))
+        asyncio.run(
+            run(
+                args.url,
+                skip_video=args.skip_video,
+                output_dir=getattr(args, "dir", ""),
+                resume=getattr(args, "resume", False),
+                from_step=getattr(args, "from_step", None),
+                to_step=getattr(args, "to_step", None),
+                force_steps=set(getattr(args, "force_steps", [])),
+                dry_run=getattr(args, "dry_run", False),
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -12,7 +12,16 @@ import httpx
 from PIL import Image as PILImage
 from playwright.async_api import Page, async_playwright
 
-from src.models import ImageAsset, PageContent, ScrapedArticle, VideoAsset
+from src.artifacts import write_artifact
+from src.models import (
+    CoverManifest,
+    ImageAsset,
+    ImageManifest,
+    ImageRecord,
+    PageContent,
+    ScrapedArticle,
+    VideoAsset,
+)
 
 _MIN_WIDTH = 600
 _MIN_HEIGHT = 300
@@ -661,23 +670,22 @@ async def download_images(
         headers["Cookie"] = cookie_value
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        async def download_one(index: int, image: ImageAsset) -> dict[str, Any]:
+        async def download_one(index: int, image: ImageAsset) -> ImageRecord:
             relative_path = os.path.join("images", f"{index:03d}.jpg")
             absolute_path = os.path.join(output_dir, relative_path)
             local_path = await _download_image(client, image.url, absolute_path, headers=headers)
-            record: dict[str, Any] = {
-                "url": image.url,
-                "local_path": relative_path,
-                "status": "downloaded" if local_path else "failed",
-                "error": None if local_path else "download failed after 3 attempts",
-                "alt": image.alt,
-                "caption": image.caption,
-                "credit": image.credit,
-                "width": image.width,
-                "height": image.height,
-                "is_cover": index == cover_image_index,
-            }
-            return record
+            return ImageRecord(
+                url=image.url,
+                local_path=relative_path,
+                status="downloaded" if local_path else "failed",
+                error=None if local_path else "download failed after 3 attempts",
+                alt=image.alt,
+                caption=image.caption,
+                credit=image.credit,
+                width=image.width,
+                height=image.height,
+                is_cover=index == cover_image_index,
+            ).model_dump()
 
         records = await asyncio.gather(
             *(download_one(index, image) for index, image in enumerate(images))
@@ -703,8 +711,10 @@ async def scrape_article(url: str, cookies: list[dict], output_dir: str) -> Scra
         cookies=cookies,
         cover_image_index=content.cover_image_index,
     )
-    with open(os.path.join(output_dir, "images.json"), "w", encoding="utf-8") as images_file:
-        json.dump(records, images_file, ensure_ascii=False, indent=2)
+    write_artifact(
+        os.path.join(output_dir, "images.json"),
+        ImageManifest(images=[ImageRecord.model_validate(record) for record in records]),
+    )
     image_paths = [
         os.path.join(output_dir, record["local_path"])
         for record in records
@@ -719,20 +729,17 @@ async def scrape_article(url: str, cookies: list[dict], output_dir: str) -> Scra
         cover_record = records[content.cover_image_index]
         if cover_record["status"] == "downloaded":
             cover_image_path = os.path.join(output_dir, cover_record["local_path"])
-    with open(os.path.join(output_dir, "cover.json"), "w", encoding="utf-8") as cover_file:
-        json.dump(
-            {
-                "image_index": content.cover_image_index,
-                "image_url": content.cover_image_url,
-                "local_path": (
-                    os.path.relpath(cover_image_path, output_dir)
-                    if cover_image_path else None
-                ),
-            },
-            cover_file,
-            ensure_ascii=False,
-            indent=2,
-        )
+    write_artifact(
+        os.path.join(output_dir, "cover.json"),
+        CoverManifest(
+            image_index=content.cover_image_index,
+            image_url=content.cover_image_url,
+            local_path=(
+                os.path.relpath(cover_image_path, output_dir)
+                if cover_image_path else None
+            ),
+        ),
+    )
 
     return ScrapedArticle(
         title=title,

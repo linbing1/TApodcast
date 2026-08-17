@@ -59,7 +59,9 @@ def test_generate_publish_copy_reuses_cover_title_and_writes_outputs(tmp_path):
     assert (tmp_path / "publish_description.txt").read_text(
         encoding="utf-8"
     ) == result["description_with_hashtags"]
-    assert json.loads((tmp_path / "publish.json").read_text(encoding="utf-8")) == result
+    saved = json.loads((tmp_path / "publish.json").read_text(encoding="utf-8"))
+    assert saved["schema_version"] == 1
+    assert {key: value for key, value in saved.items() if key != "schema_version"} == result
 
     request = json.loads(llm.calls[0][1])
     assert request["cover_title"] == cover_title

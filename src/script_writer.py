@@ -6,6 +6,7 @@ from src.models import AnalyzedArticle, PodcastScript
 logger = logging.getLogger(__name__)
 
 _MAX_SCRIPT_CHARS = 950
+PROMPT_VERSION = "script-writer-v1"
 
 _SYSTEM_PROMPT_TEMPLATE = """你是一位专业的短视频播客主播。请将以下英超新闻分析改写为自然流畅的中文口语播报脚本。
 

@@ -3,9 +3,16 @@ import logging
 import re
 from pathlib import Path
 
+from src.artifacts import (
+    load_image_caption_manifest,
+    load_image_manifest,
+    write_artifact,
+)
 from src.llm import LLMClient
+from src.models import ImageCaptionManifest, ImageCaptionRecord, ImageRecord
 
 logger = logging.getLogger(__name__)
+PROMPT_VERSION = "image-captioner-v1"
 
 _SYSTEM_PROMPT = """你是一位中文体育短视频编辑。请把图片说明翻译并精简成适合视频画面展示的中文图注。
 
@@ -34,8 +41,8 @@ def _strip_credit(text: object) -> str:
     return _CREDIT_SUFFIX_RE.sub("", _normalize_caption(text)).strip()
 
 
-def _caption_source(record: dict) -> str:
-    return _strip_credit(record.get("caption") or record.get("alt"))
+def _caption_source(record: ImageRecord) -> str:
+    return _strip_credit(record.caption or record.alt)
 
 
 def _parse_response(response: str) -> dict[int, str]:
@@ -66,24 +73,19 @@ def generate_image_captions(output_dir: str, llm: LLMClient) -> list[dict[str, s
         logger.info("No image manifest found; skipping image captions: %s", manifest_path)
         return []
 
-    records = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(records, list):
-        raise ValueError(f"Image manifest must contain a JSON array: {manifest_path}")
+    records = load_image_manifest(manifest_path).images
 
-    output_records: list[dict[str, str]] = []
-    output_by_index: dict[int, dict[str, str]] = {}
+    output_records: list[ImageCaptionRecord] = []
+    output_by_index: dict[int, ImageCaptionRecord] = {}
     candidates: list[dict[str, object]] = []
     for index, record in enumerate(records):
-        if not isinstance(record, dict):
-            continue
-        if record.get("status") not in (None, "downloaded"):
+        if record.status != "downloaded":
             continue
         original = _caption_source(record)
-        output_record = {
-            "local_path": record.get("local_path", f"images/{index:03d}.jpg"),
-            "caption_original": original,
-            "caption_cn": "",
-        }
+        output_record = ImageCaptionRecord(
+            local_path=record.local_path or f"images/{index:03d}.jpg",
+            caption_original=original,
+        )
         output_records.append(output_record)
         output_by_index[index] = output_record
         if original:
@@ -98,20 +100,20 @@ def generate_image_captions(output_dir: str, llm: LLMClient) -> list[dict[str, s
         translated = _parse_response(response)
         for index, caption in translated.items():
             if index in output_by_index:
-                output_by_index[index]["caption_cn"] = caption
+                output_by_index[index].caption_cn = caption
 
-    output_path.write_text(
-        json.dumps(output_records, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    write_artifact(
+        output_path,
+        ImageCaptionManifest(captions=output_records),
     )
-    translated_count = sum(bool(record["caption_cn"]) for record in output_records)
+    translated_count = sum(bool(record.caption_cn) for record in output_records)
     logger.info(
         "Generated %d/%d Chinese image captions: %s",
         translated_count,
         len(output_records),
         output_path,
     )
-    return output_records
+    return [record.model_dump() for record in output_records]
 
 
 def load_image_captions(output_dir: str, image_paths: list[str]) -> list[str]:
@@ -119,16 +121,15 @@ def load_image_captions(output_dir: str, image_paths: list[str]) -> list[str]:
     if not captions_path.exists():
         return [""] * len(image_paths)
 
-    records = json.loads(captions_path.read_text(encoding="utf-8"))
-    if not isinstance(records, list):
+    try:
+        records = load_image_caption_manifest(captions_path).captions
+    except ValueError:
         logger.warning("Ignoring invalid image captions file: %s", captions_path)
         return [""] * len(image_paths)
 
     by_name = {
-        Path(record.get("local_path", "")).name: _normalize_caption(
-            record.get("caption_cn")
-        )
+        Path(record.local_path).name: _normalize_caption(record.caption_cn)
         for record in records
-        if isinstance(record, dict) and record.get("local_path")
+        if record.local_path
     }
     return [by_name.get(Path(path).name, "") for path in image_paths]

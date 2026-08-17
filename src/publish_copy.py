@@ -2,9 +2,13 @@ import json
 import logging
 from pathlib import Path
 
+from src.artifacts import load_analyzed_article, load_page_content, write_artifact
 from src.llm import LLMClient
+from src.models import PublishCopy
+from src.storage import atomic_write_text
 
 logger = logging.getLogger(__name__)
+PROMPT_VERSION = "publish-copy-v1"
 
 TITLE_MAX_LENGTH = 30
 PUBLISH_TEXT_MAX_LENGTH = 1000
@@ -87,16 +91,11 @@ def _ensure_minimum_hashtags(hashtags: list[str]) -> list[str]:
     return result[:MAX_HASHTAGS]
 
 
-def _load_json(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return data if isinstance(data, dict) else {}
-
-
 def _build_source_material(output_dir: Path) -> dict[str, object]:
-    page = _load_json(output_dir / "page.json")
-    analysis = _load_json(output_dir / "analysis.json")
+    page_path = output_dir / "page.json"
+    analysis_path = output_dir / "analysis.json"
+    page = load_page_content(page_path) if page_path.exists() else None
+    analysis = load_analyzed_article(analysis_path) if analysis_path.exists() else None
     script_path = output_dir / "script.txt"
     script = script_path.read_text(encoding="utf-8").strip() if script_path.exists() else ""
     title_path = output_dir / "title.txt"
@@ -105,18 +104,18 @@ def _build_source_material(output_dir: Path) -> dict[str, object]:
         if title_path.exists()
         else ""
     )
-    if not page and not analysis and not script:
+    if page is None and analysis is None and not script:
         raise FileNotFoundError(
             f"No article material found in {output_dir}; run steps 1 and 2 first"
         )
 
     return {
         "cover_title": cover_title,
-        "original_title": page.get("title", ""),
+        "original_title": page.title if page else "",
         "analysis": {
-            key: analysis.get(key, "")
+            key: getattr(analysis, key, "")
             for key in ("title_cn", "overview", "detail", "key_people_and_data", "impact")
-            if analysis.get(key)
+            if analysis and getattr(analysis, key, "")
         },
         "script": script[:12000],
     }
@@ -160,22 +159,15 @@ def generate_publish_copy(output_dir: str, llm: LLMClient) -> dict[str, object]:
     description = _normalize_text(data.get("description"))
     hashtags = _ensure_minimum_hashtags(_normalize_hashtags(data.get("hashtags")))
     description, description_with_hashtags = _fit_publish_text(description, hashtags)
-    result = {
-        "title": title,
-        "description": description,
-        "hashtags": hashtags,
-        "description_with_hashtags": description_with_hashtags,
-    }
-
-    (directory / "publish.json").write_text(
-        json.dumps(result, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    result = PublishCopy(
+        title=title,
+        description=description,
+        hashtags=hashtags,
+        description_with_hashtags=description_with_hashtags,
     )
-    (directory / "title.txt").write_text(title, encoding="utf-8")
-    (directory / "publish_title.txt").write_text(title, encoding="utf-8")
-    (directory / "publish_description.txt").write_text(
-        description_with_hashtags,
-        encoding="utf-8",
-    )
+    write_artifact(directory / "publish.json", result)
+    atomic_write_text(directory / "title.txt", title)
+    atomic_write_text(directory / "publish_title.txt", title)
+    atomic_write_text(directory / "publish_description.txt", description_with_hashtags)
     logger.info("Generated publish copy: %s", directory / "publish.json")
-    return result
+    return result.model_dump(exclude={"schema_version"})

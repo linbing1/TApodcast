@@ -1,14 +1,16 @@
 import json
 import logging
-from dataclasses import fields
+
+from pydantic import ValidationError
 
 from src.llm import LLMClient
 from src.models import AnalyzedArticle, ScrapedArticle
 
 logger = logging.getLogger(__name__)
 
-_ANALYZED_FIELDS = {f.name for f in fields(AnalyzedArticle)}
+_ANALYZED_FIELDS = set(AnalyzedArticle.model_fields) - {"schema_version"}
 _TITLE_MAX_LENGTH = 30
+PROMPT_VERSION = "analyzer-v1"
 
 _SYSTEM_PROMPT = """你是一位资深英超足球记者和分析师。请对以下英超文章进行深度中文分析。
 
@@ -53,8 +55,10 @@ def analyze_article(article: ScrapedArticle, llm: LLMClient) -> AnalyzedArticle:
             "\"'“”‘’# "
         )[:_TITLE_MAX_LENGTH]
     filtered.setdefault("link", article.link)
+    missing = _ANALYZED_FIELDS - set(filtered)
+    if missing:
+        raise ValueError(f"LLM response missing required fields {missing}: {response[:200]}")
     try:
         return AnalyzedArticle(**filtered)
-    except TypeError as e:
-        missing = _ANALYZED_FIELDS - set(filtered)
+    except ValidationError as e:
         raise ValueError(f"LLM response missing required fields {missing}: {response[:200]}") from e

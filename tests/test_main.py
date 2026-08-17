@@ -1,13 +1,17 @@
 import json
+from datetime import date
 from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 
 from main import (
+    _build_pipeline_runner,
     download_images_command,
     extract,
     generate_audio,
+    run,
     run_cover_only,
+    run_pipeline_step,
     run_publish_only,
 )
 from src.models import (
@@ -17,6 +21,22 @@ from src.models import (
     PodcastScript,
     VideoAsset,
 )
+from src.pipeline import PipelineContext
+
+
+def test_pipeline_registers_all_publish_stages(tmp_path):
+    runner = _build_pipeline_runner(
+        PipelineContext("https://example.com/article", str(tmp_path))
+    )
+
+    assert runner.step_names == [
+        "extract",
+        "download-images",
+        "generate-audio",
+        "video",
+        "cover",
+        "publish-copy",
+    ]
 
 
 @pytest.mark.asyncio
@@ -39,11 +59,87 @@ async def test_extract_writes_separate_content_outputs(
 
     assert result == str(output_dir)
     assert (output_dir / "text.txt").read_text(encoding="utf-8") == "Arsenal won the match."
-    assert json.loads((output_dir / "images.json").read_text(encoding="utf-8"))[0]["alt"] == "Team"
-    assert json.loads((output_dir / "videos.json").read_text(encoding="utf-8"))[0]["kind"] == "iframe"
+    assert json.loads((output_dir / "images.json").read_text(encoding="utf-8"))["images"][0]["alt"] == "Team"
+    assert json.loads((output_dir / "videos.json").read_text(encoding="utf-8"))["videos"][0]["kind"] == "iframe"
     page = json.loads((output_dir / "page.json").read_text(encoding="utf-8"))
     assert page["title"] == "Arsenal Win"
     mock_extract.assert_awaited_once_with("https://example.com/article", [])
+
+
+@pytest.mark.asyncio
+@patch("main._build_pipeline_runner")
+async def test_run_configures_pipeline_runner(mock_build_runner):
+    url = "https://www.nytimes.com/athletic/123/article-slug/"
+    output_dir = "output/custom/article-slug"
+    mock_build_runner.return_value.run = AsyncMock()
+
+    result = await run(
+        url,
+        output_dir=output_dir,
+        resume=True,
+        from_step="download-images",
+        to_step="video",
+        force_steps={"generate-audio"},
+        dry_run=True,
+    )
+
+    assert result == output_dir
+    context = mock_build_runner.call_args.args[0]
+    assert context.article_url == url
+    assert context.output_dir == output_dir
+    mock_build_runner.return_value.run.assert_awaited_once_with(
+        resume=True,
+        from_step="download-images",
+        to_step="video",
+        force_steps={"generate-audio"},
+        dry_run=True,
+    )
+
+
+@pytest.mark.asyncio
+@patch("main._build_pipeline_runner")
+async def test_run_skip_video_stops_after_audio(mock_build_runner):
+    url = "https://www.nytimes.com/athletic/123/article-slug/"
+    output_dir = f"output/{date.today()}/article-slug"
+    mock_build_runner.return_value.run = AsyncMock()
+
+    result = await run(url, skip_video=True)
+
+    assert result == output_dir
+    mock_build_runner.return_value.run.assert_awaited_once_with(
+        resume=False,
+        from_step=None,
+        to_step="generate-audio",
+        force_steps=None,
+        dry_run=False,
+    )
+
+
+@pytest.mark.asyncio
+@patch("main._build_pipeline_runner")
+async def test_run_pipeline_step_uses_article_url_from_page(mock_build_runner, tmp_path):
+    output_dir = tmp_path / "article"
+    output_dir.mkdir()
+    (output_dir / "page.json").write_text(
+        json.dumps({"url": "https://example.com/article"}),
+        encoding="utf-8",
+    )
+    mock_build_runner.return_value.run = AsyncMock()
+
+    result = await run_pipeline_step(
+        "video",
+        str(output_dir),
+        video_title="自定义标题",
+    )
+
+    assert result == str(output_dir)
+    context = mock_build_runner.call_args.args[0]
+    assert context.article_url == "https://example.com/article"
+    assert context.video_title == "自定义标题"
+    mock_build_runner.return_value.run.assert_awaited_once_with(
+        from_step="video",
+        to_step="video",
+    )
 
 
 @pytest.mark.asyncio
@@ -59,6 +155,8 @@ async def test_download_images_command_reads_manifest_and_writes_results(
         json.dumps({
             "url": "https://example.com/article",
             "images": [{"url": "https://cdn.example.com/image.jpg", "alt": "Team"}],
+            "cover_image_index": 0,
+            "cover_image_url": "https://cdn.example.com/cover.jpg",
         }),
         encoding="utf-8",
     )
@@ -73,7 +171,14 @@ async def test_download_images_command_reads_manifest_and_writes_results(
 
     assert result == str(output_dir)
     records = json.loads((output_dir / "images.json").read_text(encoding="utf-8"))
-    assert records[0]["local_path"] == "images/000.jpg"
+    assert records["images"][0]["local_path"] == "images/000.jpg"
+    cover = json.loads((output_dir / "cover.json").read_text(encoding="utf-8"))
+    assert cover == {
+        "schema_version": 1,
+        "image_index": 0,
+        "image_url": "https://cdn.example.com/cover.jpg",
+        "local_path": "images/000.jpg",
+    }
     mock_download.assert_awaited_once()
 
 
