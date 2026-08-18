@@ -329,7 +329,6 @@ def analyze_content(output_dir: str) -> str:
     logger.info("Analyzing article and extracting traceable source facts...")
     analyzed = analyze_article(article, llm)
     write_artifact(os.path.join(output_dir, "analysis.json"), analyzed)
-    atomic_write_text(os.path.join(output_dir, "title.txt"), analyzed.title_cn)
     logger.info("Analysis output: %s", os.path.join(output_dir, "analysis.json"))
     return output_dir
 
@@ -383,7 +382,11 @@ def finalize_content_command(output_dir: str) -> str:
     llm = _create_llm_client()
 
     logger.info("Finalizing content through the review and rewrite gate...")
-    final_script, report = finalize_content(
+    final_title_path = Path(output_dir) / "title.txt"
+    final_script_path = Path(output_dir) / "script.txt"
+    final_title_path.unlink(missing_ok=True)
+    final_script_path.unlink(missing_ok=True)
+    final_title, final_script, report = finalize_content(
         article,
         analyzed,
         initial_script,
@@ -393,7 +396,9 @@ def finalize_content_command(output_dir: str) -> str:
     )
     write_artifact(os.path.join(output_dir, "content-quality.json"), report)
     if not report.passed:
+        title_candidate_path = Path(output_dir) / "title-candidate.txt"
         candidate_path = Path(output_dir) / "script-candidate.txt"
+        atomic_write_text(title_candidate_path, final_title)
         atomic_write_text(candidate_path, final_script.text)
         raise ValueError(
             "Content quality gate failed after "
@@ -401,10 +406,10 @@ def finalize_content_command(output_dir: str) -> str:
             f"{report.final_review.summary or 'review the content-quality.json report'}"
         )
 
-    atomic_write_text(os.path.join(output_dir, "script.txt"), final_script.text)
-    candidate_path = Path(output_dir) / "script-candidate.txt"
-    if candidate_path.exists():
-        candidate_path.unlink()
+    atomic_write_text(final_title_path, final_title)
+    atomic_write_text(final_script_path, final_script.text)
+    for filename in ("title-candidate.txt", "script-candidate.txt"):
+        (Path(output_dir) / filename).unlink(missing_ok=True)
     logger.info(
         "Content quality gate passed (overall=%d): %s",
         report.final_review.scores.overall,
@@ -545,7 +550,7 @@ def _build_pipeline_runner(context: PipelineContext) -> PipelineRunner:
             name="analyze-content",
             action=_pipeline_analyze_content,
             inputs=_static_paths("page.json"),
-            outputs=_static_paths("analysis.json", "title.txt"),
+            outputs=_static_paths("analysis.json"),
             configuration_keys=("llm_base_url", "llm_model"),
             prompt_keys=("analyzer",),
         ),
@@ -574,7 +579,7 @@ def _build_pipeline_runner(context: PipelineContext) -> PipelineRunner:
                 "script-draft.txt",
                 "content-review.json",
             ),
-            outputs=_static_paths("content-quality.json", "script.txt"),
+            outputs=_static_paths("content-quality.json", "title.txt", "script.txt"),
             configuration_keys=("llm_base_url", "llm_model"),
             prompt_keys=("content_reviewer", "content_rewriter"),
         ),

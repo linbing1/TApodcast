@@ -132,19 +132,23 @@ class ContentReview(VersionedArtifact):
     issues: list[QualityIssue] = Field(default_factory=list)
     summary: str = ""
     source_sha256: str = ""
+    title_sha256: str = ""
     script_sha256: str = ""
 
 
 class ContentRevision(StrictModel):
     attempt: int = Field(ge=1)
+    title: str
     script: str
     review: ContentReview
 
 
 class ContentQualityReport(VersionedArtifact):
+    initial_title: str
     initial_script: str
     initial_review: ContentReview
     revisions: list[ContentRevision] = Field(default_factory=list)
+    final_title: str
     final_script: str
     final_review: ContentReview
     passed: bool

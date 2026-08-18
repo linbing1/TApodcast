@@ -209,11 +209,11 @@ videos.json    # 视频、iframe 或 JSON-LD 视频清单
 该步骤不处理视频或 ffmpeg 合成，会生成：
 
 ```text
-analysis.json          # LLM 结构化分析及可追踪 source_facts
-title.txt              # 中文标题
+analysis.json          # LLM 结构化分析、初始标题及可追踪 source_facts
 script-draft.txt       # 未经审校的第一版口播稿
 content-review.json    # 第一轮结构化审校结果
-content-quality.json   # 初稿、历次修订、评分、问题和最终审校结果
+content-quality.json   # 初始/最终标题、历次修订、评分、问题和最终审校结果
+title.txt              # 通过质量门禁的最终中文标题
 script.txt             # 通过质量门禁的最终口播稿
 image_captions.json    # 图片本地路径、原始英文说明和精简中文图注
 audio.mp3              # TTS 音频
@@ -231,7 +231,7 @@ audio.vtt              # TTS 时间字幕
 
 `analysis.json` 中的 `source_facts` 为每条事实分配 `F001` 形式的编号，并保存中文事实、原文依据、类别和重要级别。审校器会逐项检查所有 `critical` 事实，以及人物、俱乐部、数字、金额、日期、引语归属、因果关系和不确定性措辞。
 
-质量门禁要求事实准确度至少 90、完整度至少 85、结构/口语性/标题质量至少 80、总分至少 85，且不能存在 `error` 或 `blocker`。未通过时最多自动修订两轮；仍未通过则停止后续 TTS 和视频生成，保留 `content-quality.json` 和最后一版 `script-candidate.txt` 供人工检查。
+质量门禁要求事实准确度至少 90、完整度至少 85、结构/口语性/标题质量至少 80、总分至少 85，且不能存在 `error` 或 `blocker`。未通过时最多自动修订两轮，标题和播报稿会一起修正；仍未通过则停止后续 TTS 和视频生成，保留 `content-quality.json`、`title-candidate.txt` 和 `script-candidate.txt` 供人工检查。最终 `title.txt` 和 `script.txt` 只在质量门禁通过后生成。
 
 播报稿以 850–950 个汉字、约 3 分钟口播为目标，超长时会自动压缩；规定的节目开头、结尾、长度和 Markdown 污染同时由确定性规则检查，不完全依赖 LLM 自评。
 

@@ -83,3 +83,20 @@ class TestAnalyzeArticle:
 
         with pytest.raises(ValueError, match="missing source facts"):
             analyze_article(_make_scraped(), mock_llm)
+
+    def test_normalizes_structured_values_in_text_fields(self):
+        mock_llm = MagicMock()
+        response = json.loads(_valid_response())
+        response["overview"] = ["阿森纳取胜。", "球队升至榜首。"]
+        response["key_people_and_data"] = {
+            "people": ["萨卡", "厄德高"],
+            "data": ["2粒进球", "60%控球率"],
+        }
+        mock_llm.complete.return_value = json.dumps(response, ensure_ascii=False)
+
+        result = analyze_article(_make_scraped(), mock_llm)
+
+        assert result.overview == "阿森纳取胜。；球队升至榜首。"
+        assert result.key_people_and_data == (
+            "people：萨卡；厄德高；data：2粒进球；60%控球率"
+        )

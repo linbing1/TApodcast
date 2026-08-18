@@ -21,8 +21,8 @@ from src.script_writer import (
 )
 
 
-REVIEW_PROMPT_VERSION = "content-reviewer-v1"
-REWRITE_PROMPT_VERSION = "content-rewriter-v1"
+REVIEW_PROMPT_VERSION = "content-reviewer-v2"
+REWRITE_PROMPT_VERSION = "content-rewriter-v2"
 MAX_REVISIONS = 2
 
 _SCORE_THRESHOLDS = {
@@ -45,6 +45,8 @@ _REVIEW_SYSTEM_PROMPT = """你是一位严谨的中文体育内容总编，负�
 4. 区分原文事实、原文观点和未来推测，不得把传闻写成已发生事实。
 5. 标题必须准确、有信息量，但不得夸大。
 6. 播报稿应按原文逻辑组织，适合自然口播，避免重复和生硬书面语。
+7. 待审标题位于输入的 title_cn 字段；播报稿正文不需要、也不应重复标题。不得以“正文没有标题”为理由扣分。
+8. 固定节目开头中的当天日期属于节目制作元数据，不是文章事实；不得因为原文未出现该日期而扣事实准确度分。
 
 只返回 JSON 对象，格式如下：
 {
@@ -72,7 +74,7 @@ _REVIEW_SYSTEM_PROMPT = """你是一位严谨的中文体育内容总编，负�
 
 评分必须严格。事实准确度低于90、完整度低于85、总分低于85，或存在 error/blocker 时，passed 必须为 false。"""
 
-_REWRITE_SYSTEM_PROMPT = """你是一位资深中文体育播报稿编辑。请只修复审校报告指出的问题，生成一版完整的最终候选稿。
+_REWRITE_SYSTEM_PROMPT = """你是一位资深中文体育播报稿编辑。请只修复审校报告指出的问题，同时生成新的中文标题和完整播报稿。
 
 必须遵守：
 - 原文是唯一事实来源，不得添加原文没有的信息、评论或推测
@@ -82,7 +84,9 @@ _REWRITE_SYSTEM_PROMPT = """你是一位资深中文体育播报稿编辑。请�
 - 结尾固定为“感谢收听，更多内容请关注英超每日观察。”
 - 全文控制在850-950个汉字，不超过950字
 - 使用自然口语和短句，避免重复
-- 只返回完整播报稿，不解释修改过程"""
+- 标题不超过30个汉字，准确表达协议状态和不确定性，不得夸大
+- 只返回 JSON 对象：{{"title_cn": "修订后的标题", "script": "修订后的完整播报稿"}}
+- 不解释修改过程"""
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,11 @@ def _parse_json_object(response: str) -> dict:
 
 def _content_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _normalize_title(value: object, fallback: str) -> str:
+    title = " ".join(str(value or "").split()).strip("\"'“”‘’# ")[:30]
+    return title or fallback
 
 
 def _static_issues(analyzed: AnalyzedArticle, script: str) -> list[QualityIssue]:
@@ -239,6 +248,7 @@ def review_content(
             "full_text": article.full_text,
         },
         "analysis": analyzed.model_dump(mode="json"),
+        "title_cn": analyzed.title_cn,
         "script": script.text,
     }
     response = llm.complete(
@@ -251,6 +261,7 @@ def review_content(
     data.setdefault("issues", [])
     data.setdefault("summary", "")
     data["source_sha256"] = _content_hash(article.full_text)
+    data["title_sha256"] = _content_hash(analyzed.title_cn)
     data["script_sha256"] = _content_hash(script.text)
     try:
         review = ContentReview.model_validate(data)
@@ -269,7 +280,7 @@ def review_content(
     return review
 
 
-def rewrite_script(
+def rewrite_content(
     article: ScrapedArticle,
     analyzed: AnalyzedArticle,
     script: PodcastScript,
@@ -277,7 +288,7 @@ def rewrite_script(
     llm: LLMClient,
     *,
     date_str: str,
-) -> PodcastScript:
+) -> tuple[str, PodcastScript]:
     payload = {
         "source": {
             "title": article.title,
@@ -288,11 +299,18 @@ def rewrite_script(
         "current_script": script.text,
         "review": review.model_dump(mode="json"),
     }
-    text = llm.complete(
+    response = llm.complete(
         _REWRITE_SYSTEM_PROMPT.format(date_str=date_str or "今天"),
         json.dumps(payload, ensure_ascii=False),
-    ).strip()
-    return PodcastScript(text=fit_script_length(text, llm))
+        json_mode=True,
+    )
+    data = _parse_json_object(response)
+    title = _normalize_title(data.get("title_cn"), analyzed.title_cn)
+    script_value = data.get("script") or data.get("script_text")
+    if not isinstance(script_value, str) or not script_value.strip():
+        raise ValueError(f"Content rewrite response is missing script: {response[:200]}")
+    script = PodcastScript(text=fit_script_length(script_value, llm))
+    return title, script
 
 
 def finalize_content(
@@ -304,13 +322,15 @@ def finalize_content(
     *,
     date_str: str,
     max_revisions: int = MAX_REVISIONS,
-) -> tuple[PodcastScript, ContentQualityReport]:
+) -> tuple[str, PodcastScript, ContentQualityReport]:
+    current_title = analyzed.title_cn
     current_script = initial_script
     current_review = initial_review
     revisions: list[ContentRevision] = []
 
     if current_review.passed and (
         current_review.source_sha256 != _content_hash(article.full_text)
+        or current_review.title_sha256 != _content_hash(current_title)
         or current_review.script_sha256 != _content_hash(current_script.text)
     ):
         current_review = review_content(article, analyzed, current_script, llm)
@@ -318,30 +338,40 @@ def finalize_content(
     for attempt in range(1, max_revisions + 1):
         if current_review.passed:
             break
-        current_script = rewrite_script(
+        current_analysis = analyzed.model_copy(update={"title_cn": current_title})
+        current_title, current_script = rewrite_content(
             article,
-            analyzed,
+            current_analysis,
             current_script,
             current_review,
             llm,
             date_str=date_str,
         )
-        current_review = review_content(article, analyzed, current_script, llm)
+        current_analysis = analyzed.model_copy(update={"title_cn": current_title})
+        current_review = review_content(
+            article,
+            current_analysis,
+            current_script,
+            llm,
+        )
         revisions.append(
             ContentRevision(
                 attempt=attempt,
+                title=current_title,
                 script=current_script.text,
                 review=current_review,
             )
         )
 
     report = ContentQualityReport(
+        initial_title=analyzed.title_cn,
         initial_script=initial_script.text,
         initial_review=initial_review,
         revisions=revisions,
+        final_title=current_title,
         final_script=current_script.text,
         final_review=current_review,
         passed=current_review.passed,
         max_revisions=max_revisions,
     )
-    return current_script, report
+    return current_title, current_script, report

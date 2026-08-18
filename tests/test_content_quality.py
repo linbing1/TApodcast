@@ -74,6 +74,17 @@ def _review_response(*, overall: int = 92, issues: list[dict] | None = None) -> 
     )
 
 
+def _rewrite_response(
+    *,
+    title: str = "阿森纳主场力克对手",
+    script: str | None = None,
+) -> str:
+    return json.dumps(
+        {"title_cn": title, "script": script or _script().text},
+        ensure_ascii=False,
+    )
+
+
 def _failed_review() -> ContentReview:
     return ContentReview(
         passed=False,
@@ -106,10 +117,14 @@ def test_review_passes_when_scores_and_static_rules_pass():
     assert result.passed is True
     assert result.scores.overall == 92
     assert len(result.source_sha256) == 64
+    assert len(result.title_sha256) == 64
     assert len(result.script_sha256) == 64
     request = json.loads(llm.complete.call_args.args[1])
+    system_prompt = llm.complete.call_args.args[0]
     assert request["analysis"]["source_facts"][0]["fact_id"] == "F001"
+    assert request["title_cn"] == "阿森纳主场取胜"
     assert request["source"]["full_text"].startswith("Arsenal won")
+    assert "节目制作元数据" in system_prompt
 
 
 def test_review_rejects_low_scores_even_if_llm_marks_passed():
@@ -138,9 +153,13 @@ def test_review_static_rules_reject_invalid_program_format():
 def test_finalize_rewrites_and_reviews_until_quality_gate_passes():
     llm = MagicMock()
     revised_script = _script().text
-    llm.complete.side_effect = [revised_script, _review_response()]
+    revised_title = "阿森纳主场力克对手"
+    llm.complete.side_effect = [
+        _rewrite_response(title=revised_title, script=revised_script),
+        _review_response(),
+    ]
 
-    final_script, report = finalize_content(
+    final_title, final_script, report = finalize_content(
         _article(),
         _analyzed(),
         PodcastScript(text="不合格初稿"),
@@ -149,6 +168,7 @@ def test_finalize_rewrites_and_reviews_until_quality_gate_passes():
         date_str="2026年8月18日",
     )
 
+    assert final_title == revised_title
     assert final_script.text == revised_script
     assert report.passed is True
     assert len(report.revisions) == 1
@@ -172,13 +192,13 @@ def test_finalize_preserves_review_history_when_gate_never_passes():
         ]
     )
     llm.complete.side_effect = [
-        revised_script,
+        _rewrite_response(script=revised_script),
         failing_response,
-        revised_script,
+        _rewrite_response(script=revised_script),
         failing_response,
     ]
 
-    _, report = finalize_content(
+    _, _, report = finalize_content(
         _article(),
         _analyzed(),
         PodcastScript(text="不合格初稿"),
@@ -210,7 +230,7 @@ def test_finalize_rechecks_a_stale_passing_review():
         script_sha256="old-script",
     )
 
-    final_script, report = finalize_content(
+    final_title, final_script, report = finalize_content(
         _article(),
         _analyzed(),
         _script(),
@@ -220,6 +240,7 @@ def test_finalize_rechecks_a_stale_passing_review():
     )
 
     assert report.passed is True
+    assert final_title == _analyzed().title_cn
     assert final_script.text == _script().text
     assert report.final_review.script_sha256 != "old-script"
     llm.complete.assert_called_once()

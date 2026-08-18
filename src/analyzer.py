@@ -12,6 +12,15 @@ _ANALYZED_FIELDS = set(AnalyzedArticle.model_fields) - {"schema_version"}
 _REQUIRED_ANALYZED_FIELDS = _ANALYZED_FIELDS - {"source_facts"}
 _TITLE_MAX_LENGTH = 30
 PROMPT_VERSION = "analyzer-v2"
+_TEXT_FIELDS = {
+    "title_original",
+    "article_type",
+    "overview",
+    "detail",
+    "key_people_and_data",
+    "impact",
+    "link",
+}
 
 _SYSTEM_PROMPT = """你是一位资深英超足球记者和分析师。请对以下英超文章进行深度中文分析。
 
@@ -52,11 +61,54 @@ def _parse_response(response: str) -> dict:
     return data
 
 
+def _normalize_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "；".join(
+            text for item in value if (text := _normalize_text(item))
+        )
+    if isinstance(value, dict):
+        parts = []
+        for key, item in value.items():
+            text = _normalize_text(item)
+            if text:
+                parts.append(f"{key}：{text}")
+        return "；".join(parts)
+    return str(value).strip()
+
+
+def _normalize_source_facts(value: object) -> object:
+    if isinstance(value, dict):
+        value = value.get("facts") or value.get("items") or value.get("source_facts")
+    if not isinstance(value, list):
+        return value
+    facts = []
+    for item in value:
+        if not isinstance(item, dict):
+            facts.append(item)
+            continue
+        normalized = dict(item)
+        for field in ("fact_id", "claim", "evidence", "category", "importance"):
+            if field in normalized:
+                normalized[field] = _normalize_text(normalized[field])
+        facts.append(normalized)
+    return facts
+
+
 def analyze_article(article: ScrapedArticle, llm: LLMClient) -> AnalyzedArticle:
     user_text = f"Title: {article.title}\nLink: {article.link}\nContent:\n{article.full_text}"
     response = llm.complete(_SYSTEM_PROMPT, user_text, json_mode=True)
     data = _parse_response(response)
     filtered = {k: v for k, v in data.items() if k in _ANALYZED_FIELDS}
+    for field in _TEXT_FIELDS & filtered.keys():
+        filtered[field] = _normalize_text(filtered[field])
+    if "source_facts" in filtered:
+        filtered["source_facts"] = _normalize_source_facts(
+            filtered["source_facts"]
+        )
     if "title_cn" in filtered:
         filtered["title_cn"] = " ".join(str(filtered["title_cn"]).split()).strip(
             "\"'“”‘’# "
@@ -70,7 +122,7 @@ def analyze_article(article: ScrapedArticle, llm: LLMClient) -> AnalyzedArticle:
     try:
         analyzed = AnalyzedArticle(**filtered)
     except ValidationError as e:
-        raise ValueError(f"LLM response missing required fields {missing}: {response[:200]}") from e
+        raise ValueError(f"Invalid analyzed article response: {response[:200]}") from e
     fact_ids = [fact.fact_id for fact in analyzed.source_facts]
     if len(fact_ids) != len(set(fact_ids)):
         raise ValueError("LLM response contains duplicate source fact IDs")
