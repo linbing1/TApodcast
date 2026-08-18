@@ -2,6 +2,332 @@
 
 将 The Athletic 文章自动生成适合抖音发布的竖屏短视频（中文配音 + 图片轮播 + 字幕）。
 
+## Agent 自动处理协议
+
+本节是其他 Agent 处理文章时的**最高优先级操作协议**。后续章节用于解释每个命令和产物；如果只是要自动完成一篇文章，应先完整执行本节，而不是自行猜测步骤。
+
+### 任务输入
+
+必需输入：
+
+- 一条完整的 The Athletic 文章 URL。
+
+可选输入：
+
+- 用户指定的输出目录；如果没有指定，使用 `output/<运行日期>/<article-slug>/`。
+- 是否只生成内容和音频、不生成视频；只有用户明确要求时才使用 `--skip-video`。
+
+开始前先固定变量，后续所有重试必须继续使用同一个 `OUT`：
+
+```bash
+URL="https://www.nytimes.com/athletic/ARTICLE_ID/article-slug/"
+SLUG="${URL%/}"
+SLUG="${SLUG##*/}"
+OUT="output/$(date +%F)/$SLUG"
+MODE="fresh"
+SCOPE="full"
+```
+
+`MODE` 可取 `fresh`、`reused-page` 或 `reused-assets`；`SCOPE="full"` 表示完整生成视频、封面和发布文案，用户明确要求跳过视频时改为 `SCOPE="audio"`。如果 Agent 的多次 Shell 调用彼此隔离，每次调用都必须重新声明 `URL`、`OUT`、`MODE` 和 `SCOPE`，不能假设变量会自动保留。
+
+### 完成定义
+
+Agent 只有在满足以下条件后才能报告“处理完成”：
+
+1. `manifest.json` 中本次要求执行的阶段全部为 `completed`。
+2. `content-quality.json` 中 `passed` 为 `true`。
+3. 正式的 `title.txt` 和 `script.txt` 均存在；`title-candidate.txt` 和 `script-candidate.txt` 不存在。
+4. `audio.mp3`、`audio.vtt`、`image_captions.json` 均存在且非空。
+5. 完整流程还必须生成：竖屏 MP4、`cover.png`、`cover-landscape.png`、`publish.json`、`publish_title.txt` 和 `publish_description.txt`。
+6. MP4 必须为 `1080×1920`、`30fps`，并同时包含 H.264 视频流和 AAC 音频流。
+7. `cover.png` 必须为 `1080×1920`，`cover-landscape.png` 必须为 `1920×1080`。
+8. `publish.json` 中的标题必须与 `title.txt` 完全一致。
+9. `frames/` 不应在成功完成后残留。
+
+以下情况不能报告完成：
+
+- 只运行了测试，没有运行真实文章；
+- 页面提取失败，却把历史内容说成刚刚抓取的内容；
+- 内容质量门禁失败；
+- 只有候选稿，没有正式标题或正式稿件；
+- TTS、视频、封面或发布文案仍有失败阶段。
+
+### 标准自动执行顺序
+
+#### 1. 检查仓库和环境
+
+不要删除既有输出目录，不要修改与当前文章无关的文件，也不要自动提交、推送或合并 Git 代码。
+
+```bash
+git status --short --branch
+.venv/bin/python main.py doctor
+```
+
+本地 `doctor` 存在 `FAIL` 时，先修复环境问题，不要启动正式流程。
+
+#### 2. 检查在线服务和文章访问
+
+```bash
+.venv/bin/python main.py doctor --online --url "$URL"
+```
+
+处理规则：
+
+- LLM 连接失败：停止处理并报告阻塞原因。
+- TTS 出现连接重置或超时：可以重试一次在线检查；正式 TTS 阶段本身也会自动重试三次。
+- 文章页面出现连接超时：重试一次；仍失败时按下文“历史抓取产物复用”处理。
+- Cookie 失效、登录页或正文为空：不能继续使用当前抓取结果。
+
+#### 3. 选择新运行或断点续跑
+
+如果 `OUT/manifest.json` 不存在，运行完整流程：
+
+```bash
+.venv/bin/python main.py run --url "$URL" --dir "$OUT"
+```
+
+用户明确要求只处理到音频时：
+
+```bash
+SCOPE="audio"
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" --skip-video
+```
+
+如果输出目录已经存在，先查看执行计划，再断点续跑：
+
+```bash
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" --resume --dry-run
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" --resume
+```
+
+必须使用 `--dir "$OUT"` 固定目录。不要因为跨天重试而创建另一个默认日期目录。
+
+#### 4. 历史抓取产物复用
+
+只有当在线文章访问连续失败时，才允许查找历史 `page.json`：
+
+```bash
+rg -l --fixed-strings "$URL" output -g 'page.json'
+```
+
+复用规则：
+
+1. `page.json` 中的 `url` 必须与输入 URL 完全一致。
+2. `main_text` 必须非空，并记录复用目录和原抓取日期。
+3. 默认复制匹配的 `page.json` 到本次固定的 `OUT`，从 `download-images` 开始运行，避免覆盖历史目录。
+4. 必须在最终报告中明确写明“文章本次未重新抓取，复用了历史抓取产物”。
+5. 如果没有完全匹配的历史产物，停止并报告文章访问阻塞；禁止用搜索摘要、其他报道或模型记忆替代原文。
+
+```bash
+MATCH="/path/to/matched/page.json"
+MODE="reused-page"
+mkdir -p "$OUT"
+cp "$MATCH" "$OUT/page.json"
+TO_STEP="publish-copy"
+if [ "$SCOPE" = "audio" ]; then TO_STEP="generate-audio"; fi
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" \
+  --from download-images --to "$TO_STEP"
+```
+
+如果 `download-images` 因图片 CDN 超时而失败，但同一历史目录中已经存在成功下载的 `images/`、`images.json` 和 `cover.json`，可以连同历史图片资产一起复用：
+
+```bash
+HIST_DIR="$(dirname "$MATCH")"
+MODE="reused-assets"
+mkdir -p "$OUT/images"
+cp "$HIST_DIR/page.json" "$OUT/page.json"
+cp "$HIST_DIR/images.json" "$OUT/images.json"
+cp "$HIST_DIR/cover.json" "$OUT/cover.json"
+cp -R "$HIST_DIR/images/." "$OUT/images/"
+TO_STEP="publish-copy"
+if [ "$SCOPE" = "audio" ]; then TO_STEP="generate-audio"; fi
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" \
+  --from analyze-content --to "$TO_STEP"
+```
+
+历史图片资产只能在以下检查通过后使用：`images.json` 至少有一条 `status=downloaded`，每条已下载记录的 `local_path` 都存在，并且图片可以被 Pillow 解码。
+
+```bash
+OUT="$OUT" .venv/bin/python - <<'PY'
+import json
+import os
+from pathlib import Path
+from PIL import Image
+
+out = Path(os.environ["OUT"])
+manifest = json.loads((out / "images.json").read_text(encoding="utf-8"))
+records = manifest if isinstance(manifest, list) else manifest.get("images", [])
+downloaded = [record for record in records if record.get("status") == "downloaded"]
+assert downloaded
+for record in downloaded:
+    path = out / record["local_path"]
+    assert path.exists()
+    with Image.open(path) as image:
+        image.verify()
+print("historical image assets are reusable:", len(downloaded))
+PY
+```
+
+复制前应读取并校验历史文件：
+
+```bash
+URL="$URL" MATCH="$MATCH" .venv/bin/python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+page = json.loads(Path(os.environ["MATCH"]).read_text(encoding="utf-8"))
+assert page.get("url") == os.environ["URL"]
+assert str(page.get("main_text", "")).strip()
+print("historical page is reusable")
+PY
+```
+
+#### 5. 验收内容质量
+
+读取 `content-quality.json`，不要只看命令退出码：
+
+```bash
+OUT="$OUT" MODE="$MODE" SCOPE="$SCOPE" .venv/bin/python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+out = Path(os.environ["OUT"])
+mode = os.environ.get("MODE", "fresh")
+scope = os.environ.get("SCOPE", "full")
+manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+report = json.loads((out / "content-quality.json").read_text(encoding="utf-8"))
+required = [
+    "extract",
+    "download-images",
+    "analyze-content",
+    "write-script",
+    "review-content",
+    "finalize-content",
+    "generate-audio",
+    "video",
+    "cover",
+    "publish-copy",
+]
+if mode in {"reused-page", "reused-assets"}:
+    required.remove("extract")
+if mode == "reused-assets":
+    required.remove("download-images")
+if scope == "audio":
+    required = required[: required.index("generate-audio") + 1]
+incomplete = {
+    name: manifest.get("steps", {}).get(name, {}).get("status", "missing")
+    for name in required
+    if manifest.get("steps", {}).get(name, {}).get("status") != "completed"
+}
+print("stage statuses:", {
+    name: manifest.get("steps", {}).get(name, {}).get("status", "missing")
+    for name in required
+})
+print("passed:", report["passed"])
+print("scores:", report["final_review"]["scores"])
+print("revisions:", len(report["revisions"]))
+for issue in report["final_review"]["issues"]:
+    print(issue["severity"], issue["dimension"], issue["description"])
+if incomplete or not report["passed"]:
+    raise SystemExit(1)
+PY
+```
+
+`warning` 可以保留，但必须在最终报告中列出。存在 `error`、`blocker` 或 `passed=false` 时，不得继续生成音频、视频和发布文案。
+
+#### 6. 验收最终媒体和发布产物
+
+仅当 `SCOPE="full"` 时执行本节；`SCOPE="audio"` 时以第五步的门禁、音频和字幕检查作为完成条件。
+
+```bash
+VIDEO="$(find "$OUT" -maxdepth 1 -type f -name '*.mp4' -print -quit)"
+ffprobe -v error \
+  -show_entries format=duration:stream=codec_name,width,height,r_frame_rate \
+  -of json "$VIDEO"
+```
+
+检查封面尺寸和标题一致性：
+
+```bash
+OUT="$OUT" .venv/bin/python - <<'PY'
+import json
+import os
+from pathlib import Path
+from PIL import Image
+
+out = Path(os.environ["OUT"])
+title = (out / "title.txt").read_text(encoding="utf-8").strip()
+publish = json.loads((out / "publish.json").read_text(encoding="utf-8"))
+assert publish["title"] == title
+assert Image.open(out / "cover.png").size == (1080, 1920)
+assert Image.open(out / "cover-landscape.png").size == (1920, 1080)
+assert not (out / "frames").exists()
+print("title:", title)
+print("publish title matches: yes")
+PY
+```
+
+### 失败恢复矩阵
+
+| 失败位置 | Agent 应执行的动作 | 禁止行为 |
+|----------|--------------------|----------|
+| `doctor` 本地检查 | 修复缺失环境变量、Chromium、FFmpeg/libass 或字体 | 跳过预检直接运行 |
+| 文章提取超时 | 重试一次；再查找 URL 完全匹配的历史 `page.json` | 把历史抓取说成新抓取，或用其他来源替代 |
+| 图片 CDN 下载失败 | 优先重试；仍失败时验证并复用同一历史目录的 `images/`、`images.json` 和 `cover.json` | 使用缺失、损坏或 URL 不匹配的图片资产 |
+| LLM JSON 结构变化 | 保存失败目录，补数据归一化和回归测试，从失败阶段重跑 | 手工篡改 JSON 后宣称流程正常 |
+| 初次 `review-content` 未通过 | 正常继续执行 `finalize-content`，让系统自动修订和复审 | 绕过 `finalize-content` 直接生成 TTS |
+| `finalize-content` 未通过 | 查看 `content-quality.json`、候选标题和候选稿；修复后强制重跑该阶段 | 把候选文件改名为正式文件 |
+| TTS 连接重置 | 等待内置重试；仍失败时从 `generate-audio` 重跑 | 伪造空音频或跳过字幕 |
+| 视频编码失败 | 保留 `frames/` 排查 FFmpeg、字体和字幕，修复后重跑 `video` | 删除唯一的故障现场后直接报告完成 |
+| 封面或发布文案失败 | 单独重跑 `cover` 或 `publish-copy` | 只交付部分产物却报告完整成功 |
+
+常用恢复命令：
+
+```bash
+# 强制重新审校和定稿
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" --resume \
+  --force review-content --force finalize-content
+
+# 只重新生成音频
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" \
+  --from generate-audio --to generate-audio
+
+# 只重新生成视频到发布文案
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" \
+  --from video --to publish-copy
+```
+
+### 真实运行暴露代码缺陷时
+
+如果真实文章触发了代码缺陷，Agent 应按以下顺序处理：
+
+1. 保留失败输出目录、`manifest.json` 和错误日志。
+2. 找到根因，不要只针对当前文章手工修产物。
+3. 增加能够复现真实响应形态的回归测试。
+4. 先运行相关测试，再运行完整测试：`.venv/bin/python -m pytest tests/ -q`。
+5. 从失败阶段重新运行同一篇文章并完成上述验收。
+6. 在最终报告中区分“代码测试通过”和“真实文章流程通过”。
+7. 除非用户明确要求，否则不要执行 `git commit`、`git push` 或合并分支。
+
+### Agent 最终报告格式
+
+最终回复至少包含：
+
+```text
+状态：成功 / 部分成功 / 阻塞
+文章 URL：...
+输出目录：...
+执行范围：full / audio
+文章来源：本次重新抓取 / 复用 YYYY-MM-DD 的历史 page.json / 同时复用历史图片资产
+质量门禁：通过或失败；总分、事实准确度、完整度、修订次数
+非阻断警告：逐条列出
+最终产物：标题、稿件字数、音视频时长、视频规格、封面规格、发布文案
+验证：manifest 阶段状态、测试结果（如果修改了代码）
+未完成项：没有则写“无”
+```
+
 ## 五步流程
 
 ```
@@ -16,7 +342,7 @@
 | 步骤 | 输入 | 主要处理 | 产物 |
 |------|------|----------|------|
 | 第一步：内容解析 | The Athletic 文章 URL | 提取主要文字、图片、原始图注和视频清单，分离图注与署名，确定封面主图并下载图片 | `page.json`、`text.txt`、`images/`、`images.json`、`videos.json`、`cover.json` |
-| 第二步：内容质量 + TTS | `page.json`、`images.json` | 提取可追踪事实，生成初稿，对照原文审校，最多自动修订两轮；通过质量门禁后翻译图注并生成约三分钟配音 | `analysis.json`、`script-draft.txt`、`content-review.json`、`content-quality.json`、`script.txt`、`image_captions.json`、`audio.mp3`、`audio.vtt` |
+| 第二步：内容质量 + TTS | `page.json`、`images.json` | 提取可追踪事实，生成初稿，对照原文审校，最多自动修订两轮；通过质量门禁后翻译图注并生成约三分钟配音 | `analysis.json`、`script-draft.txt`、`content-review.json`、`content-quality.json`、`title.txt`、`script.txt`、`image_captions.json`、`audio.mp3`、`audio.vtt` |
 | 第三步：视频合成 | `images/`、`image_captions.json`、`audio.mp3`、`audio.vtt` | 按图片路径匹配中文图注，生成图片轮播并烧录黄色口播字幕 | `subtitles.ass`、`<中文标题>.mp4` |
 | 第四步：封面生成 | 封面主图和 `title.txt` | 生成带栏目标签、当前日期和中文标题的竖版与横版独立封面 | `cover.png`、`cover-landscape.png` |
 | 第五步：发布文案 | `page.json`、`analysis.json`、`script.txt`、`title.txt` | 整理不超过30字的抖音标题，并生成作品简介和相关话题 | `publish.json`、`publish_title.txt`、`publish_description.txt` |
