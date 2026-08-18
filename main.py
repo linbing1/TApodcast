@@ -10,8 +10,19 @@ from urllib.parse import urlparse
 
 from src.analyzer import PROMPT_VERSION as ANALYZER_PROMPT_VERSION
 from src.analyzer import analyze_article
-from src.artifacts import load_page_content, write_artifact
+from src.artifacts import (
+    load_analyzed_article,
+    load_content_review,
+    load_page_content,
+    write_artifact,
+)
 from src.config import get_config
+from src.content_quality import (
+    REVIEW_PROMPT_VERSION,
+    REWRITE_PROMPT_VERSION,
+    finalize_content,
+    review_content,
+)
 from src.cover_renderer import generate_cover, generate_cover_landscape
 from src.doctor import format_doctor_report, run_doctor_checks
 from src.image_captioner import PROMPT_VERSION as IMAGE_CAPTION_PROMPT_VERSION
@@ -21,6 +32,7 @@ from src.models import (
     CoverManifest,
     ImageManifest,
     ImageRecord,
+    PodcastScript,
     ScrapedArticle,
     VideoManifest,
 )
@@ -44,6 +56,10 @@ logger = logging.getLogger(__name__)
 PIPELINE_STEP_NAMES = (
     "extract",
     "download-images",
+    "analyze-content",
+    "write-script",
+    "review-content",
+    "finalize-content",
     "generate-audio",
     "video",
     "cover",
@@ -272,7 +288,15 @@ async def download_images_command(output_dir: str) -> str:
 
 
 async def generate_audio(output_dir: str) -> str:
-    config = get_config()
+    analyze_content(output_dir)
+    write_script_draft(output_dir)
+    review_content_command(output_dir)
+    finalize_content_command(output_dir)
+    await generate_audio_assets(output_dir)
+    return output_dir
+
+
+def _load_source_article(output_dir: str) -> ScrapedArticle:
     page_path = os.path.join(output_dir, "page.json")
     if not os.path.exists(page_path):
         raise FileNotFoundError(f"Page manifest not found: {page_path}")
@@ -281,29 +305,126 @@ async def generate_audio(output_dir: str) -> str:
     main_text = page.main_text.strip()
     if not main_text:
         raise ValueError(f"No article text found in page manifest: {page_path}")
-
-    article = ScrapedArticle(
+    return ScrapedArticle(
         title=page.title.strip(),
         link=page.url,
         full_text=main_text,
     )
-    llm = LLMClient(config["llm_base_url"], config["llm_api_key"], config["llm_model"])
 
-    logger.info("Step 2.1: Analyzing article with LLM...")
+
+def _create_llm_client() -> LLMClient:
+    config = get_config()
+    return LLMClient(config["llm_base_url"], config["llm_api_key"], config["llm_model"])
+
+
+def _speech_date() -> str:
+    today = date.today()
+    return f"{today.year}年{today.month}月{today.day}日"
+
+
+def analyze_content(output_dir: str) -> str:
+    article = _load_source_article(output_dir)
+    llm = _create_llm_client()
+
+    logger.info("Analyzing article and extracting traceable source facts...")
     analyzed = analyze_article(article, llm)
     write_artifact(os.path.join(output_dir, "analysis.json"), analyzed)
     atomic_write_text(os.path.join(output_dir, "title.txt"), analyzed.title_cn)
+    logger.info("Analysis output: %s", os.path.join(output_dir, "analysis.json"))
+    return output_dir
 
-    logger.info("Step 2.2: Translating and shortening image captions with LLM...")
+
+def write_script_draft(output_dir: str) -> str:
+    analysis_path = os.path.join(output_dir, "analysis.json")
+    if not os.path.exists(analysis_path):
+        raise FileNotFoundError(f"Article analysis not found: {analysis_path}")
+    analyzed = load_analyzed_article(analysis_path)
+    llm = _create_llm_client()
+
+    logger.info("Writing first podcast script draft...")
+    script = write_script(analyzed, llm, date_str=_speech_date())
+    atomic_write_text(os.path.join(output_dir, "script-draft.txt"), script.text)
+    logger.info("Draft output: %s", os.path.join(output_dir, "script-draft.txt"))
+    return output_dir
+
+
+def review_content_command(output_dir: str) -> str:
+    article = _load_source_article(output_dir)
+    analyzed = load_analyzed_article(os.path.join(output_dir, "analysis.json"))
+    draft_path = Path(output_dir) / "script-draft.txt"
+    if not draft_path.exists():
+        raise FileNotFoundError(f"Podcast script draft not found: {draft_path}")
+    script = PodcastScript(text=draft_path.read_text(encoding="utf-8").strip())
+    llm = _create_llm_client()
+
+    logger.info("Reviewing draft against the original article and source facts...")
+    review = review_content(article, analyzed, script, llm)
+    write_artifact(os.path.join(output_dir, "content-review.json"), review)
+    logger.info(
+        "Initial content review: %s (overall=%d)",
+        "passed" if review.passed else "needs revision",
+        review.scores.overall,
+    )
+    return output_dir
+
+
+def finalize_content_command(output_dir: str) -> str:
+    article = _load_source_article(output_dir)
+    analyzed = load_analyzed_article(os.path.join(output_dir, "analysis.json"))
+    initial_review = load_content_review(
+        os.path.join(output_dir, "content-review.json")
+    )
+    draft_path = Path(output_dir) / "script-draft.txt"
+    if not draft_path.exists():
+        raise FileNotFoundError(f"Podcast script draft not found: {draft_path}")
+    initial_script = PodcastScript(
+        text=draft_path.read_text(encoding="utf-8").strip()
+    )
+    llm = _create_llm_client()
+
+    logger.info("Finalizing content through the review and rewrite gate...")
+    final_script, report = finalize_content(
+        article,
+        analyzed,
+        initial_script,
+        initial_review,
+        llm,
+        date_str=_speech_date(),
+    )
+    write_artifact(os.path.join(output_dir, "content-quality.json"), report)
+    if not report.passed:
+        candidate_path = Path(output_dir) / "script-candidate.txt"
+        atomic_write_text(candidate_path, final_script.text)
+        raise ValueError(
+            "Content quality gate failed after "
+            f"{len(report.revisions)} revision(s): "
+            f"{report.final_review.summary or 'review the content-quality.json report'}"
+        )
+
+    atomic_write_text(os.path.join(output_dir, "script.txt"), final_script.text)
+    candidate_path = Path(output_dir) / "script-candidate.txt"
+    if candidate_path.exists():
+        candidate_path.unlink()
+    logger.info(
+        "Content quality gate passed (overall=%d): %s",
+        report.final_review.scores.overall,
+        os.path.join(output_dir, "script.txt"),
+    )
+    return output_dir
+
+
+async def generate_audio_assets(output_dir: str) -> str:
+    config = get_config()
+    script_path = Path(output_dir) / "script.txt"
+    if not script_path.exists():
+        raise FileNotFoundError(f"Final podcast script not found: {script_path}")
+    script = PodcastScript(text=script_path.read_text(encoding="utf-8").strip())
+    llm = LLMClient(config["llm_base_url"], config["llm_api_key"], config["llm_model"])
+
+    logger.info("Translating and shortening image captions with LLM...")
     generate_image_captions(output_dir, llm)
 
-    logger.info("Step 2.3: Writing podcast script with LLM...")
-    today = date.today()
-    speech_date = f"{today.year}年{today.month}月{today.day}日"
-    script = write_script(analyzed, llm, date_str=speech_date)
-    atomic_write_text(os.path.join(output_dir, "script.txt"), script.text)
-
-    logger.info("Step 2.4: Generating audio with edge-tts...")
+    logger.info("Generating audio with edge-tts...")
     mp3_path, vtt_path = await generate_tts(
         script,
         config["tts_voice"],
@@ -329,8 +450,24 @@ async def _pipeline_download_images(context: PipelineContext) -> None:
     await download_images_command(context.output_dir)
 
 
+def _pipeline_analyze_content(context: PipelineContext) -> None:
+    analyze_content(context.output_dir)
+
+
+def _pipeline_write_script(context: PipelineContext) -> None:
+    write_script_draft(context.output_dir)
+
+
+def _pipeline_review_content(context: PipelineContext) -> None:
+    review_content_command(context.output_dir)
+
+
+def _pipeline_finalize_content(context: PipelineContext) -> None:
+    finalize_content_command(context.output_dir)
+
+
 async def _pipeline_generate_audio(context: PipelineContext) -> None:
-    await generate_audio(context.output_dir)
+    await generate_audio_assets(context.output_dir)
 
 
 def _pipeline_video(context: PipelineContext) -> None:
@@ -384,6 +521,8 @@ def _prompt_versions() -> dict[str, str]:
         "analyzer": ANALYZER_PROMPT_VERSION,
         "image_captioner": IMAGE_CAPTION_PROMPT_VERSION,
         "script_writer": SCRIPT_PROMPT_VERSION,
+        "content_reviewer": REVIEW_PROMPT_VERSION,
+        "content_rewriter": REWRITE_PROMPT_VERSION,
         "publish_copy": PUBLISH_PROMPT_VERSION,
     }
 
@@ -403,17 +542,58 @@ def _build_pipeline_runner(context: PipelineContext) -> PipelineRunner:
             outputs=_static_paths("images.json", "cover.json", "images"),
         ),
         PipelineStep(
+            name="analyze-content",
+            action=_pipeline_analyze_content,
+            inputs=_static_paths("page.json"),
+            outputs=_static_paths("analysis.json", "title.txt"),
+            configuration_keys=("llm_base_url", "llm_model"),
+            prompt_keys=("analyzer",),
+        ),
+        PipelineStep(
+            name="write-script",
+            action=_pipeline_write_script,
+            inputs=_static_paths("analysis.json"),
+            outputs=_static_paths("script-draft.txt"),
+            configuration_keys=("llm_base_url", "llm_model"),
+            prompt_keys=("script_writer",),
+        ),
+        PipelineStep(
+            name="review-content",
+            action=_pipeline_review_content,
+            inputs=_static_paths("page.json", "analysis.json", "script-draft.txt"),
+            outputs=_static_paths("content-review.json"),
+            configuration_keys=("llm_base_url", "llm_model"),
+            prompt_keys=("content_reviewer",),
+        ),
+        PipelineStep(
+            name="finalize-content",
+            action=_pipeline_finalize_content,
+            inputs=_static_paths(
+                "page.json",
+                "analysis.json",
+                "script-draft.txt",
+                "content-review.json",
+            ),
+            outputs=_static_paths("content-quality.json", "script.txt"),
+            configuration_keys=("llm_base_url", "llm_model"),
+            prompt_keys=("content_reviewer", "content_rewriter"),
+        ),
+        PipelineStep(
             name="generate-audio",
             action=_pipeline_generate_audio,
-            inputs=_static_paths("page.json", "images.json"),
+            inputs=_static_paths("images.json", "script.txt"),
             outputs=_static_paths(
-                "analysis.json",
                 "image_captions.json",
-                "title.txt",
-                "script.txt",
                 "audio.mp3",
                 "audio.vtt",
             ),
+            configuration_keys=(
+                "llm_base_url",
+                "llm_model",
+                "tts_voice",
+                "tts_rate",
+            ),
+            prompt_keys=("image_captioner",),
         ),
         PipelineStep(
             name="video",
@@ -442,6 +622,8 @@ def _build_pipeline_runner(context: PipelineContext) -> PipelineRunner:
                 "publish_title.txt",
                 "publish_description.txt",
             ),
+            configuration_keys=("llm_base_url", "llm_model"),
+            prompt_keys=("publish_copy",),
         ),
     ]
     return PipelineRunner(context, steps)
@@ -489,6 +671,19 @@ async def run_pipeline_step(
     )
     runner = _build_pipeline_runner(context)
     await runner.run(from_step=step_name, to_step=step_name)
+    return output_dir
+
+
+async def run_content_audio_pipeline(output_dir: str) -> str:
+    resolved_url = _article_url_from_output(output_dir)
+    context = PipelineContext(
+        article_url=resolved_url,
+        output_dir=output_dir,
+        configuration=_pipeline_configuration(),
+        prompt_versions=_prompt_versions(),
+    )
+    runner = _build_pipeline_runner(context)
+    await runner.run(from_step="analyze-content", to_step="generate-audio")
     return output_dir
 
 
@@ -569,9 +764,19 @@ def main() -> None:
     dl = sub.add_parser("download-images", help="Download images from an extracted page manifest")
     dl.add_argument("--dir", required=True, help="Directory containing page.json")
 
+    content_commands = {
+        "analyze-content": "Extract analysis and traceable facts from the article",
+        "write-script": "Generate the first podcast script draft",
+        "review-content": "Review the draft against the original article",
+        "finalize-content": "Rewrite until the content quality gate passes",
+    }
+    for command, help_text in content_commands.items():
+        content = sub.add_parser(command, help=help_text)
+        content.add_argument("--dir", required=True, help="Article output directory")
+
     audio = sub.add_parser(
         "generate-audio",
-        help="Analyze an extracted article and generate podcast audio",
+        help="Run the content quality workflow and generate podcast audio",
     )
     audio.add_argument("--dir", required=True, help="Directory containing page.json")
 
@@ -652,8 +857,15 @@ def main() -> None:
         )
     elif args.cmd == "download-images":
         asyncio.run(run_pipeline_step("download-images", args.dir))
+    elif args.cmd in {
+        "analyze-content",
+        "write-script",
+        "review-content",
+        "finalize-content",
+    }:
+        asyncio.run(run_pipeline_step(args.cmd, args.dir))
     elif args.cmd == "generate-audio":
-        asyncio.run(run_pipeline_step("generate-audio", args.dir))
+        asyncio.run(run_content_audio_pipeline(args.dir))
     else:
         if not args.url:
             parser.print_help()

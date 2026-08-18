@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.models import AnalyzedArticle, PodcastScript
+from src.models import AnalyzedArticle, PodcastScript, SourceFact
 from src.script_writer import write_script
 
 
@@ -16,6 +16,15 @@ def _make_analyzed() -> AnalyzedArticle:
         key_people_and_data="萨卡：2球",
         impact="阿森纳升至榜首",
         link="https://example.com/1",
+        source_facts=[
+            SourceFact(
+                fact_id="F001",
+                claim="阿森纳在主场击败曼城。",
+                evidence="Arsenal beat Manchester City at home.",
+                category="比赛",
+                importance="critical",
+            )
+        ],
     )
 
 
@@ -36,6 +45,7 @@ class TestWriteScript:
         assert "阿森纳在主场击败曼城" in user_arg
         assert "萨卡：2球" in user_arg
         assert "阿森纳升至榜首" in user_arg
+        assert "F001" in user_arg
 
     def test_strips_whitespace_from_response(self):
         mock_llm = MagicMock()

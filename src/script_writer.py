@@ -1,3 +1,4 @@
+import json
 import logging
 
 from src.llm import LLMClient
@@ -5,8 +6,9 @@ from src.models import AnalyzedArticle, PodcastScript
 
 logger = logging.getLogger(__name__)
 
-_MAX_SCRIPT_CHARS = 950
-PROMPT_VERSION = "script-writer-v1"
+SCRIPT_TARGET_MIN_CHARS = 850
+SCRIPT_MAX_CHARS = 950
+PROMPT_VERSION = "script-writer-v2"
 
 _SYSTEM_PROMPT_TEMPLATE = """你是一位专业的短视频播客主播。请将以下英超新闻分析改写为自然流畅的中文口语播报脚本。
 
@@ -45,11 +47,18 @@ def write_script(article: AnalyzedArticle, llm: LLMClient, date_str: str = "") -
         f"概述：{article.overview}\n"
         f"详情：{article.detail}\n"
         f"关键人物与数据：{article.key_people_and_data}\n"
-        f"影响分析：{article.impact}"
+        f"影响分析：{article.impact}\n"
+        "必须覆盖的原文事实清单：\n"
+        f"{json.dumps([fact.model_dump() for fact in article.source_facts], ensure_ascii=False)}"
     )
     text = llm.complete(system_prompt, user_text).strip()
+    return PodcastScript(text=fit_script_length(text, llm))
+
+
+def fit_script_length(text: str, llm: LLMClient) -> str:
+    text = text.strip()
     for attempt in range(2):
-        if len(text) <= _MAX_SCRIPT_CHARS:
+        if len(text) <= SCRIPT_MAX_CHARS:
             break
         logger.info(
             "Podcast script has %d chars; compressing (attempt %d/2)",
@@ -58,11 +67,11 @@ def write_script(article: AnalyzedArticle, llm: LLMClient, date_str: str = "") -
         )
         text = llm.complete(
             _COMPRESSION_SYSTEM_PROMPT,
-            _COMPRESSION_PROMPT.format(max_chars=_MAX_SCRIPT_CHARS, script=text),
+            _COMPRESSION_PROMPT.format(max_chars=SCRIPT_MAX_CHARS, script=text),
         ).strip()
-    if len(text) > _MAX_SCRIPT_CHARS:
+    if len(text) > SCRIPT_MAX_CHARS:
         raise ValueError(
             f"Generated podcast script is too long: {len(text)} chars "
-            f"(maximum {_MAX_SCRIPT_CHARS})"
+            f"(maximum {SCRIPT_MAX_CHARS})"
         )
-    return PodcastScript(text=text)
+    return text

@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 SCHEMA_VERSION = 2
+PIPELINE_VERSION = "3"
 MANIFEST_FILENAME = "manifest.json"
 
 
@@ -70,7 +71,7 @@ class RunManifest:
     schema_version: int = SCHEMA_VERSION
     created_at: str = field(default_factory=_utc_now)
     updated_at: str = field(default_factory=_utc_now)
-    pipeline_version: str = "2"
+    pipeline_version: str = PIPELINE_VERSION
     configuration: dict[str, str] = field(default_factory=dict)
     prompt_versions: dict[str, str] = field(default_factory=dict)
     steps: dict[str, StepRecord] = field(default_factory=dict)
@@ -95,7 +96,7 @@ class RunManifest:
             schema_version=schema_version,
             created_at=str(data.get("created_at", _utc_now())),
             updated_at=str(data.get("updated_at", _utc_now())),
-            pipeline_version=str(data.get("pipeline_version", "2")),
+            pipeline_version=str(data.get("pipeline_version", PIPELINE_VERSION)),
             configuration=dict(data.get("configuration", {})),
             prompt_versions=dict(data.get("prompt_versions", {})),
             steps=steps,
@@ -109,7 +110,7 @@ def _migrate_manifest(data: dict) -> dict:
     migrated = dict(data)
     version = int(migrated.get("schema_version", 1))
     if version == 1:
-        migrated.setdefault("pipeline_version", "2")
+        migrated.setdefault("pipeline_version", PIPELINE_VERSION)
         migrated.setdefault("configuration", {})
         migrated.setdefault("prompt_versions", {})
         migrated["schema_version"] = 2
@@ -132,6 +133,7 @@ class ManifestStore:
         self.output_dir = Path(output_dir)
         self.path = self.output_dir / MANIFEST_FILENAME
         self.manifest = self._load(article_url)
+        self.manifest.pipeline_version = PIPELINE_VERSION
         self.manifest.configuration.update(configuration or {})
         self.manifest.prompt_versions.update(prompt_versions or {})
 

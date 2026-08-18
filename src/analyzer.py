@@ -9,8 +9,9 @@ from src.models import AnalyzedArticle, ScrapedArticle
 logger = logging.getLogger(__name__)
 
 _ANALYZED_FIELDS = set(AnalyzedArticle.model_fields) - {"schema_version"}
+_REQUIRED_ANALYZED_FIELDS = _ANALYZED_FIELDS - {"source_facts"}
 _TITLE_MAX_LENGTH = 30
-PROMPT_VERSION = "analyzer-v1"
+PROMPT_VERSION = "analyzer-v2"
 
 _SYSTEM_PROMPT = """你是一位资深英超足球记者和分析师。请对以下英超文章进行深度中文分析。
 
@@ -25,6 +26,12 @@ _SYSTEM_PROMPT = """你是一位资深英超足球记者和分析师。请对以
 - key_people_and_data: 涉及的关键人物和数据，列出所有被提及的人名、具体数据和统计（中文）
 - impact: 影响分析与展望，包含短期和中长期影响（中文）
 - link: 原文链接
+- source_facts: 可供后续审校逐项核对的事实清单，数组中每项包含：
+  - fact_id: 从 F001 开始连续编号
+  - claim: 忠实转述的中文事实，不加入推测
+  - evidence: 支撑该事实的原文短句或关键措辞
+  - category: 人物/转会/比赛/数据/引语/背景/影响之一
+  - importance: critical 或 supporting；播报稿必须覆盖所有 critical 事实
 
 重要格式要求：
 - 仅返回 JSON 对象，不要添加任何其他文字"""
@@ -55,10 +62,18 @@ def analyze_article(article: ScrapedArticle, llm: LLMClient) -> AnalyzedArticle:
             "\"'“”‘’# "
         )[:_TITLE_MAX_LENGTH]
     filtered.setdefault("link", article.link)
-    missing = _ANALYZED_FIELDS - set(filtered)
+    missing = _REQUIRED_ANALYZED_FIELDS - set(filtered)
     if missing:
         raise ValueError(f"LLM response missing required fields {missing}: {response[:200]}")
+    if not filtered.get("source_facts"):
+        raise ValueError(f"LLM response missing source facts: {response[:200]}")
     try:
-        return AnalyzedArticle(**filtered)
+        analyzed = AnalyzedArticle(**filtered)
     except ValidationError as e:
         raise ValueError(f"LLM response missing required fields {missing}: {response[:200]}") from e
+    fact_ids = [fact.fact_id for fact in analyzed.source_facts]
+    if len(fact_ids) != len(set(fact_ids)):
+        raise ValueError("LLM response contains duplicate source fact IDs")
+    if not any(fact.importance == "critical" for fact in analyzed.source_facts):
+        raise ValueError("LLM response contains no critical source facts")
+    return analyzed

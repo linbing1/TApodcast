@@ -72,6 +72,14 @@ class ScrapedArticle(StrictModel):
     cover_image_path: str | None = None
 
 
+class SourceFact(StrictModel):
+    fact_id: str = Field(pattern=r"^F\d{3}$")
+    claim: str = Field(min_length=1)
+    evidence: str = Field(min_length=1)
+    category: str = ""
+    importance: Literal["critical", "supporting"] = "supporting"
+
+
 class AnalyzedArticle(VersionedArtifact):
     title_cn: str = Field(max_length=30)
     title_original: str = ""
@@ -81,6 +89,7 @@ class AnalyzedArticle(VersionedArtifact):
     key_people_and_data: str = ""
     impact: str = ""
     link: str = ""
+    source_facts: list[SourceFact] = Field(default_factory=list)
 
     @field_validator("title_cn", mode="before")
     @classmethod
@@ -90,6 +99,56 @@ class AnalyzedArticle(VersionedArtifact):
 
 class PodcastScript(StrictModel):
     text: str
+
+
+class QualityScores(StrictModel):
+    factual_accuracy: int = Field(ge=0, le=100)
+    completeness: int = Field(ge=0, le=100)
+    structure: int = Field(ge=0, le=100)
+    spoken_style: int = Field(ge=0, le=100)
+    title_quality: int = Field(ge=0, le=100)
+    overall: int = Field(ge=0, le=100)
+
+
+class QualityIssue(StrictModel):
+    dimension: Literal[
+        "factual_accuracy",
+        "completeness",
+        "structure",
+        "spoken_style",
+        "title_quality",
+        "format",
+    ]
+    severity: Literal["warning", "error", "blocker"]
+    description: str
+    evidence: str = ""
+    suggestion: str = ""
+    fact_ids: list[str] = Field(default_factory=list)
+
+
+class ContentReview(VersionedArtifact):
+    passed: bool
+    scores: QualityScores
+    issues: list[QualityIssue] = Field(default_factory=list)
+    summary: str = ""
+    source_sha256: str = ""
+    script_sha256: str = ""
+
+
+class ContentRevision(StrictModel):
+    attempt: int = Field(ge=1)
+    script: str
+    review: ContentReview
+
+
+class ContentQualityReport(VersionedArtifact):
+    initial_script: str
+    initial_review: ContentReview
+    revisions: list[ContentRevision] = Field(default_factory=list)
+    final_script: str
+    final_review: ContentReview
+    passed: bool
+    max_revisions: int = Field(ge=0)
 
 
 class ImageCaptionRecord(StrictModel):

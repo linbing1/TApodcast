@@ -26,6 +26,7 @@ def test_manifest_records_completed_step_and_reloads(tmp_path):
 
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 2
+    assert manifest["pipeline_version"] == "3"
     assert manifest["article_url"] == "https://example.com/article"
 
 
@@ -52,6 +53,7 @@ def test_manifest_migrates_schema_v1(tmp_path):
 
     migrated = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert migrated["schema_version"] == 2
+    assert migrated["pipeline_version"] == "3"
     assert migrated["configuration"]["llm_model"] == "test-model"
     assert migrated["prompt_versions"]["analyzer"] == "v1"
 

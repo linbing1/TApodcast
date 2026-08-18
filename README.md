@@ -7,7 +7,7 @@
 ```
 文章 URL
   → 第一步：解析正文/图片/视频，保存原始图注并下载图片
-  → 第二步：LLM 分析正文与图注，生成播报稿、TTS 配音与字幕
+  → 第二步：提取事实、生成初稿、审校并自动修订，再生成 TTS 配音与字幕
   → 第三步：图片和对应中文图注轮播，合成配音与字幕
   → 第四步：使用文章主图和中文标题生成抖音封面
   → 第五步：生成抖音发布标题、作品简介和话题
@@ -16,7 +16,7 @@
 | 步骤 | 输入 | 主要处理 | 产物 |
 |------|------|----------|------|
 | 第一步：内容解析 | The Athletic 文章 URL | 提取主要文字、图片、原始图注和视频清单，分离图注与署名，确定封面主图并下载图片 | `page.json`、`text.txt`、`images/`、`images.json`、`videos.json`、`cover.json` |
-| 第二步：LLM + TTS | `page.json`、`images.json` | 分析正文，将英文图片说明翻译并精简为中文，生成中文播报稿、约三分钟配音和时间字幕 | `analysis.json`、`image_captions.json`、`title.txt`、`script.txt`、`audio.mp3`、`audio.vtt` |
+| 第二步：内容质量 + TTS | `page.json`、`images.json` | 提取可追踪事实，生成初稿，对照原文审校，最多自动修订两轮；通过质量门禁后翻译图注并生成约三分钟配音 | `analysis.json`、`script-draft.txt`、`content-review.json`、`content-quality.json`、`script.txt`、`image_captions.json`、`audio.mp3`、`audio.vtt` |
 | 第三步：视频合成 | `images/`、`image_captions.json`、`audio.mp3`、`audio.vtt` | 按图片路径匹配中文图注，生成图片轮播并烧录黄色口播字幕 | `subtitles.ass`、`<中文标题>.mp4` |
 | 第四步：封面生成 | 封面主图和 `title.txt` | 生成带栏目标签、当前日期和中文标题的竖版与横版独立封面 | `cover.png`、`cover-landscape.png` |
 | 第五步：发布文案 | `page.json`、`analysis.json`、`script.txt`、`title.txt` | 整理不超过30字的抖音标题，并生成作品简介和相关话题 | `publish.json`、`publish_title.txt`、`publish_description.txt` |
@@ -129,14 +129,18 @@ OUT="output/YYYY-MM-DD/<article-slug>"
 .venv/bin/python main.py run --url "$URL" --dir "$OUT" --resume
 ```
 
-`--resume` 只跳过状态为 `completed`，且输入、输出文件哈希均未变化的阶段。输出缺失、文件被修改或上游输入发生变化时，对应阶段会自动重新执行。
+`--resume` 只跳过状态为 `completed`，且输入、输出文件哈希、相关模型配置和提示词版本均未变化的阶段。输出缺失、文件被修改、上游输入发生变化，或相关模型/提示词版本升级时，对应阶段会自动重新执行。
 
 可以限制执行范围：
 
 ```bash
-# 从音频阶段开始，并运行到视频阶段
+# 最终稿已存在时，只重新生成音频和视频
 .venv/bin/python main.py run --url "$URL" --dir "$OUT" \
   --from generate-audio --to video
+
+# 从内容分析开始，运行到最终内容质量门禁
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" \
+  --from analyze-content --to finalize-content
 
 # 只运行正文和素材解析
 .venv/bin/python main.py run --url "$URL" --dir "$OUT" --to extract
@@ -155,7 +159,7 @@ OUT="output/YYYY-MM-DD/<article-slug>"
 .venv/bin/python main.py run --url "$URL" --dir "$OUT" --resume --dry-run
 ```
 
-当前可用阶段名为：`extract`、`download-images`、`generate-audio`、`video`、`cover`、`publish-copy`。单独执行这些分步骤命令时也会更新同一个 `manifest.json`。
+当前可用阶段名为：`extract`、`download-images`、`analyze-content`、`write-script`、`review-content`、`finalize-content`、`generate-audio`、`video`、`cover`、`publish-copy`。单独执行这些分步骤命令时也会更新同一个 `manifest.json`。
 
 结构化 JSON 产物使用 Pydantic 数据契约并带有 `schema_version`。旧版数组格式的 `images.json`、`videos.json` 和 `image_captions.json` 仍可读取；`manifest.json` 会从 schema v1 自动迁移到 v2。所有 JSON 和关键文本产物均采用临时文件加原子替换的方式写入。
 
@@ -193,27 +197,43 @@ videos.json    # 视频、iframe 或 JSON-LD 视频清单
 
 如果某篇文章是在加入图片图注功能之前抓取的，旧的 `page.json` 或 `images.json` 可能只有部分图注。此时需要对原 URL 重新执行本步骤的 `extract` 和 `download-images`，再继续执行第二、三步。
 
-### 第二步：分析正文并生成音频
+### 第二步：内容审校并生成音频
 
-从第一步生成的 `page.json` 和 `images.json` 读取正文及图片说明，依次执行 LLM 分析、图片图注翻译、播报稿生成和 TTS：
+兼容命令会从内容分析开始，依次完成事实提取、初稿生成、原文审校、自动修订、图片图注翻译和 TTS：
 
 ```bash
 .venv/bin/python main.py generate-audio \
   --dir "output/YYYY-MM-DD/<article-slug>"
 ```
 
-该步骤不处理图片、视频或 ffmpeg 合成，会生成：
+该步骤不处理视频或 ffmpeg 合成，会生成：
 
 ```text
-analysis.json        # LLM 结构化分析结果
-image_captions.json  # 图片本地路径、原始英文说明和精简中文图注
-title.txt            # 中文标题
-script.txt           # 中文播报稿
-audio.mp3            # TTS 音频
-audio.vtt            # TTS 时间字幕
+analysis.json          # LLM 结构化分析及可追踪 source_facts
+title.txt              # 中文标题
+script-draft.txt       # 未经审校的第一版口播稿
+content-review.json    # 第一轮结构化审校结果
+content-quality.json   # 初稿、历次修订、评分、问题和最终审校结果
+script.txt             # 通过质量门禁的最终口播稿
+image_captions.json    # 图片本地路径、原始英文说明和精简中文图注
+audio.mp3              # TTS 音频
+audio.vtt              # TTS 时间字幕
 ```
 
-播报稿以约 3 分钟口播为目标，超长时会自动压缩重写，成品通常在 2 至 3 分钟之间。
+内容质量流程可以独立执行，方便只重跑有问题的阶段：
+
+```bash
+.venv/bin/python main.py analyze-content --dir "$OUT"
+.venv/bin/python main.py write-script --dir "$OUT"
+.venv/bin/python main.py review-content --dir "$OUT"
+.venv/bin/python main.py finalize-content --dir "$OUT"
+```
+
+`analysis.json` 中的 `source_facts` 为每条事实分配 `F001` 形式的编号，并保存中文事实、原文依据、类别和重要级别。审校器会逐项检查所有 `critical` 事实，以及人物、俱乐部、数字、金额、日期、引语归属、因果关系和不确定性措辞。
+
+质量门禁要求事实准确度至少 90、完整度至少 85、结构/口语性/标题质量至少 80、总分至少 85，且不能存在 `error` 或 `blocker`。未通过时最多自动修订两轮；仍未通过则停止后续 TTS 和视频生成，保留 `content-quality.json` 和最后一版 `script-candidate.txt` 供人工检查。
+
+播报稿以 850–950 个汉字、约 3 分钟口播为目标，超长时会自动压缩；规定的节目开头、结尾、长度和 Markdown 污染同时由确定性规则检查，不完全依赖 LLM 自评。
 
 图片图注规则：
 
@@ -348,8 +368,16 @@ OUT="output/YYYY-MM-DD/<article-slug>"
 .venv/bin/python main.py extract --url "$URL" --dir "$OUT"
 .venv/bin/python main.py download-images --dir "$OUT"
 
-# 第二步：LLM 分析正文和图片图注，生成播报稿、TTS 和字幕
+# 第二步：运行完整内容质量流程并生成 TTS 和字幕
 .venv/bin/python main.py generate-audio --dir "$OUT"
+
+# 如需逐阶段排查，也可以替换上一条命令：
+# .venv/bin/python main.py analyze-content --dir "$OUT"
+# .venv/bin/python main.py write-script --dir "$OUT"
+# .venv/bin/python main.py review-content --dir "$OUT"
+# .venv/bin/python main.py finalize-content --dir "$OUT"
+# .venv/bin/python main.py run --url "$URL" --dir "$OUT" \
+#   --from generate-audio --to generate-audio
 
 # 第三步：生成带逐图中文图注和口播字幕的抖音竖屏视频
 .venv/bin/python main.py video --dir "$OUT"
@@ -376,10 +404,13 @@ output/
         ├── images.json      # 下载状态和图片原始元数据
         ├── videos.json      # 文章视频资源清单（不下载视频）
         ├── cover.json       # 封面主图候选（cover_image_index / cover_image_url）
-        ├── analysis.json    # 正文的 LLM 分析结果
+        ├── analysis.json    # 正文分析和带原文依据的事实清单
+        ├── script-draft.txt # 第一版口播稿
+        ├── content-review.json # 第一轮内容审校和评分
+        ├── content-quality.json # 修订历史及最终质量门禁结果
         ├── image_captions.json # 原始英文图注与精简中文图注映射
         ├── title.txt        # 中文短标题
-        ├── script.txt       # 中文口播稿
+        ├── script.txt       # 通过质量门禁的最终中文口播稿
         ├── audio.mp3        # TTS 生成的音频
         ├── audio.vtt        # 字幕文件
         ├── subtitles.ass    # FFmpeg/libass 使用的烧录字幕

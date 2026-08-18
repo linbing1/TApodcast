@@ -2,6 +2,8 @@ from pathlib import Path
 
 from src.models import (
     AnalyzedArticle,
+    ContentQualityReport,
+    ContentReview,
     CoverManifest,
     ImageCaptionManifest,
     ImageManifest,
@@ -36,6 +38,14 @@ def load_cover_manifest(path: str | Path) -> CoverManifest:
 
 def load_analyzed_article(path: str | Path) -> AnalyzedArticle:
     return AnalyzedArticle.model_validate(read_json(path))
+
+
+def load_content_review(path: str | Path) -> ContentReview:
+    return ContentReview.model_validate(read_json(path))
+
+
+def load_content_quality_report(path: str | Path) -> ContentQualityReport:
+    return ContentQualityReport.model_validate(read_json(path))
 
 
 def load_image_caption_manifest(path: str | Path) -> ImageCaptionManifest:

@@ -21,6 +21,15 @@ def _valid_response() -> str:
         "key_people_and_data": "萨卡：2球",
         "impact": "阿森纳升至榜首",
         "link": "https://example.com/1",
+        "source_facts": [
+            {
+                "fact_id": "F001",
+                "claim": "阿森纳在主场击败曼城。",
+                "evidence": "Arsenal beat Manchester City at home.",
+                "category": "比赛",
+                "importance": "critical",
+            }
+        ],
     })
 
 
@@ -31,6 +40,7 @@ class TestAnalyzeArticle:
         result = analyze_article(_make_scraped(), mock_llm)
         assert isinstance(result, AnalyzedArticle)
         assert result.title_cn == "阿森纳胜利"
+        assert result.source_facts[0].fact_id == "F001"
 
     def test_passes_title_and_text_to_llm(self):
         mock_llm = MagicMock()
@@ -64,3 +74,12 @@ class TestAnalyzeArticle:
         assert len(result.title_cn) == 30
         assert "#" not in result.title_cn
         assert "“" not in result.title_cn
+
+    def test_requires_traceable_source_facts(self):
+        mock_llm = MagicMock()
+        response = json.loads(_valid_response())
+        response["source_facts"] = []
+        mock_llm.complete.return_value = json.dumps(response, ensure_ascii=False)
+
+        with pytest.raises(ValueError, match="missing source facts"):
+            analyze_article(_make_scraped(), mock_llm)

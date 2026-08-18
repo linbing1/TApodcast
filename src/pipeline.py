@@ -1,3 +1,4 @@
+import hashlib
 import inspect
 import logging
 import time
@@ -36,6 +37,8 @@ class PipelineStep:
     action: StepAction
     inputs: PathResolver
     outputs: PathResolver
+    configuration_keys: tuple[str, ...] = ()
+    prompt_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,7 +97,18 @@ class PipelineRunner:
             raise FileNotFoundError(
                 f"Step {step.name} is missing inputs: {', '.join(missing)}"
             )
-        return fingerprint_paths(Path(self.context.output_dir), relative_paths)
+        fingerprints = fingerprint_paths(Path(self.context.output_dir), relative_paths)
+        for key in step.configuration_keys:
+            value = self.context.configuration.get(key, "")
+            fingerprints[f"@configuration/{key}"] = hashlib.sha256(
+                value.encode("utf-8")
+            ).hexdigest()
+        for key in step.prompt_keys:
+            value = self.context.prompt_versions.get(key, "")
+            fingerprints[f"@prompt/{key}"] = hashlib.sha256(
+                value.encode("utf-8")
+            ).hexdigest()
+        return fingerprints
 
     def _fingerprint_outputs(self, step: PipelineStep) -> dict[str, str]:
         relative_paths = step.outputs(self.context)

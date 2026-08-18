@@ -82,6 +82,49 @@ async def test_forced_upstream_change_reruns_dependent_step(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_prompt_version_change_reruns_only_dependent_step(tmp_path):
+    output_dir = tmp_path / "article"
+    output_dir.mkdir()
+    (output_dir / "page.json").write_text("page", encoding="utf-8")
+    calls = []
+
+    async def analyze(context):
+        calls.append(context.prompt_versions["analyzer"])
+        (output_dir / "analysis.json").write_text("analysis", encoding="utf-8")
+
+    steps = [
+        PipelineStep(
+            "analyze",
+            analyze,
+            _paths("page.json"),
+            _paths("analysis.json"),
+            configuration_keys=("llm_model",),
+            prompt_keys=("analyzer",),
+        )
+    ]
+    first_context = PipelineContext(
+        "https://example.com/article",
+        str(output_dir),
+        configuration={"llm_model": "model-a"},
+        prompt_versions={"analyzer": "v1"},
+    )
+    await PipelineRunner(first_context, steps).run()
+
+    unchanged = await PipelineRunner(first_context, steps).run(resume=True)
+    changed_context = PipelineContext(
+        "https://example.com/article",
+        str(output_dir),
+        configuration={"llm_model": "model-a"},
+        prompt_versions={"analyzer": "v2"},
+    )
+    changed = await PipelineRunner(changed_context, steps).run(resume=True)
+
+    assert unchanged[0].status == "skipped"
+    assert changed[0].status == "completed"
+    assert calls == ["v1", "v2"]
+
+
+@pytest.mark.asyncio
 async def test_pipeline_records_failed_step(tmp_path):
     output_dir = tmp_path / "article"
 
