@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.artifacts import load_analyzed_article, load_page_content, write_artifact
 from src.llm import LLMClient
+from src.llm_json import loads as loads_llm_json
 from src.models import PublishCopy
 from src.storage import atomic_write_text
 
@@ -36,17 +37,9 @@ def _normalize_text(value: object) -> str:
     return " ".join(str(value or "").split()).strip()
 
 
-def _strip_json_fence(response: str) -> str:
-    text = response.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else text
-        text = text.rsplit("```", 1)[0]
-    return text.strip()
-
-
 def _parse_response(response: str) -> dict[str, object]:
     try:
-        data = json.loads(_strip_json_fence(response))
+        data = loads_llm_json(response)
     except json.JSONDecodeError as error:
         raise ValueError(f"Failed to parse publish copy response: {response[:200]}") from error
     if not isinstance(data, dict):

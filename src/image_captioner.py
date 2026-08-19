@@ -9,6 +9,7 @@ from src.artifacts import (
     write_artifact,
 )
 from src.llm import LLMClient
+from src.llm_json import loads as loads_llm_json
 from src.models import ImageCaptionManifest, ImageCaptionRecord, ImageRecord
 
 logger = logging.getLogger(__name__)
@@ -46,11 +47,7 @@ def _caption_source(record: ImageRecord) -> str:
 
 
 def _parse_response(response: str) -> dict[int, str]:
-    text = response.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1]
-        text = text.rsplit("```", 1)[0]
-    data = json.loads(text.strip())
+    data = loads_llm_json(response)
     items = data.get("captions", []) if isinstance(data, dict) else []
     translated: dict[int, str] = {}
     for item in items:

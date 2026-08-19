@@ -57,6 +57,18 @@ class TestAnalyzeArticle:
         result = analyze_article(_make_scraped(), mock_llm)
         assert result.title_cn == "阿森纳胜利"
 
+    def test_parses_response_with_raw_control_characters(self):
+        mock_llm = MagicMock()
+        response = json.loads(_valid_response())
+        response["detail"] = "第一行\n第二行\t缩进"
+        mock_llm.complete.return_value = json.dumps(
+            response, ensure_ascii=False
+        ).replace("\\n", "\n").replace("\\t", "\t")
+
+        result = analyze_article(_make_scraped(), mock_llm)
+
+        assert result.detail == "第一行\n第二行\t缩进"
+
     def test_raises_on_malformed_response(self):
         mock_llm = MagicMock()
         mock_llm.complete.return_value = "not json at all"
@@ -100,3 +112,57 @@ class TestAnalyzeArticle:
         assert result.key_people_and_data == (
             "people：萨卡；厄德高；data：2粒进球；60%控球率"
         )
+
+    def test_normalizes_chinese_importance_aliases(self):
+        mock_llm = MagicMock()
+        response = json.loads(_valid_response())
+        response["source_facts"] = [
+            {
+                "fact_id": "F001",
+                "claim": "阿森纳在主场击败曼城。",
+                "evidence": "Arsenal beat Manchester City at home.",
+                "category": "比赛",
+                "importance": "关键",
+            },
+            {
+                "fact_id": "F002",
+                "claim": "萨卡打入两球。",
+                "evidence": "Saka scored twice.",
+                "category": "数据",
+                "importance": "支持",
+            },
+            {
+                "fact_id": "F003",
+                "claim": "阿森纳升至榜首。",
+                "evidence": "Arsenal moved top of the table.",
+                "category": "影响",
+                "importance": " Critical ",
+            },
+        ]
+        mock_llm.complete.return_value = json.dumps(response, ensure_ascii=False)
+
+        result = analyze_article(_make_scraped(), mock_llm)
+
+        assert [fact.importance for fact in result.source_facts] == [
+            "critical",
+            "supporting",
+            "critical",
+        ]
+
+    def test_defaults_unknown_importance_to_supporting(self):
+        mock_llm = MagicMock()
+        response = json.loads(_valid_response())
+        response["source_facts"][0]["importance"] = "最高优先级"
+        response["source_facts"].append({
+            "fact_id": "F002",
+            "claim": "萨卡打入两球。",
+            "evidence": "Saka scored twice.",
+            "category": "数据",
+            "importance": "critical",
+        })
+        mock_llm.complete.return_value = json.dumps(response, ensure_ascii=False)
+
+        result = analyze_article(_make_scraped(), mock_llm)
+
+        assert result.source_facts[0].importance == "supporting"
+        assert result.source_facts[1].importance == "critical"

@@ -4,6 +4,7 @@ import logging
 from pydantic import ValidationError
 
 from src.llm import LLMClient
+from src.llm_json import loads as loads_llm_json
 from src.models import AnalyzedArticle, ScrapedArticle
 
 logger = logging.getLogger(__name__)
@@ -11,7 +12,18 @@ logger = logging.getLogger(__name__)
 _ANALYZED_FIELDS = set(AnalyzedArticle.model_fields) - {"schema_version"}
 _REQUIRED_ANALYZED_FIELDS = _ANALYZED_FIELDS - {"source_facts"}
 _TITLE_MAX_LENGTH = 30
-PROMPT_VERSION = "analyzer-v2"
+PROMPT_VERSION = "analyzer-v3"
+_IMPORTANCE_ALIASES = {
+    "critical": "critical",
+    "关键": "critical",
+    "核心": "critical",
+    "重要": "critical",
+    "supporting": "supporting",
+    "support": "supporting",
+    "支持": "supporting",
+    "辅助": "supporting",
+    "次要": "supporting",
+}
 _TEXT_FIELDS = {
     "title_original",
     "article_type",
@@ -40,22 +52,17 @@ _SYSTEM_PROMPT = """你是一位资深英超足球记者和分析师。请对以
   - claim: 忠实转述的中文事实，不加入推测
   - evidence: 支撑该事实的原文短句或关键措辞
   - category: 人物/转会/比赛/数据/引语/背景/影响之一
-  - importance: critical 或 supporting；播报稿必须覆盖所有 critical 事实
+  - importance: 只能填英文 "critical" 或 "supporting"，禁止翻译成中文；播报稿必须覆盖所有 critical 事实
 
 重要格式要求：
 - 仅返回 JSON 对象，不要添加任何其他文字"""
 
 
 def _parse_response(response: str) -> dict:
-    text = response.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1]
-        text = text.rsplit("```", 1)[0]
-    text = text.strip()
     try:
-        data = json.loads(text)
+        data = loads_llm_json(response)
     except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse LLM response as JSON: {text[:200]}") from e
+        raise ValueError(f"Failed to parse LLM response as JSON: {response[:200]}") from e
     if isinstance(data, list):
         data = data[0] if data else {}
     return data
@@ -80,6 +87,18 @@ def _normalize_text(value: object) -> str:
     return str(value).strip()
 
 
+def _normalize_importance(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    key = " ".join(value.split()).lower()
+    if key in _IMPORTANCE_ALIASES:
+        return _IMPORTANCE_ALIASES[key]
+    logger.warning(
+        "Unknown source fact importance %r, defaulting to supporting", value
+    )
+    return "supporting"
+
+
 def _normalize_source_facts(value: object) -> object:
     if isinstance(value, dict):
         value = value.get("facts") or value.get("items") or value.get("source_facts")
@@ -94,6 +113,8 @@ def _normalize_source_facts(value: object) -> object:
         for field in ("fact_id", "claim", "evidence", "category", "importance"):
             if field in normalized:
                 normalized[field] = _normalize_text(normalized[field])
+        if "importance" in normalized:
+            normalized["importance"] = _normalize_importance(normalized["importance"])
         facts.append(normalized)
     return facts
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pydantic import ValidationError
 
 from src.llm import LLMClient
+from src.llm_json import loads as loads_llm_json
 from src.models import (
     AnalyzedArticle,
     ContentQualityReport,
@@ -96,15 +97,11 @@ class QualityGateResult:
 
 
 def _parse_json_object(response: str) -> dict:
-    text = response.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1]
-        text = text.rsplit("```", 1)[0]
     try:
-        data = json.loads(text.strip())
+        data = loads_llm_json(response)
     except json.JSONDecodeError as error:
         raise ValueError(
-            f"Failed to parse content review as JSON: {text[:200]}"
+            f"Failed to parse content review as JSON: {response[:200]}"
         ) from error
     if not isinstance(data, dict):
         raise ValueError("Content review response must be a JSON object")
@@ -309,7 +306,9 @@ def rewrite_content(
     script_value = data.get("script") or data.get("script_text")
     if not isinstance(script_value, str) or not script_value.strip():
         raise ValueError(f"Content rewrite response is missing script: {response[:200]}")
-    script = PodcastScript(text=fit_script_length(script_value, llm))
+    script = PodcastScript(
+        text=fit_script_length(script_value, llm, facts=analyzed.source_facts)
+    )
     return title, script
 
 
