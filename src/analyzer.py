@@ -121,7 +121,13 @@ def _normalize_source_facts(value: object) -> object:
 
 def analyze_article(article: ScrapedArticle, llm: LLMClient) -> AnalyzedArticle:
     user_text = f"Title: {article.title}\nLink: {article.link}\nContent:\n{article.full_text}"
-    response = llm.complete(_SYSTEM_PROMPT, user_text, json_mode=True)
+    response = llm.complete(
+        _SYSTEM_PROMPT,
+        user_text,
+        json_mode=True,
+        stage="analyze-content",
+        prompt_version=PROMPT_VERSION,
+    )
     data = _parse_response(response)
     filtered = {k: v for k, v in data.items() if k in _ANALYZED_FIELDS}
     for field in _TEXT_FIELDS & filtered.keys():

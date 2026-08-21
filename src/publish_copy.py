@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from pathlib import Path
 
 from src.artifacts import load_analyzed_article, load_page_content, write_artifact
@@ -132,25 +133,96 @@ def _fit_publish_text(description: str, hashtags: list[str]) -> tuple[str, str]:
     return fitted_description, _format_description(fitted_description, hashtags)
 
 
-def generate_publish_copy(output_dir: str, llm: LLMClient) -> dict[str, object]:
+_TOPIC_ALIASES = (
+    (("Arsenal", "阿森纳"), "阿森纳"),
+    (("Manchester City", "Man City", "曼城"), "曼城"),
+    (("Manchester United", "Man United", "曼联"), "曼联"),
+    (("Liverpool", "利物浦"), "利物浦"),
+    (("Chelsea", "切尔西"), "切尔西"),
+    (("Tottenham", "Spurs", "热刺"), "热刺"),
+    (("Barcelona", "巴塞罗那", "巴萨"), "巴萨"),
+    (("Real Madrid", "皇家马德里", "皇马"), "皇马"),
+    (("Aston Villa", "阿斯顿维拉", "维拉"), "阿斯顿维拉"),
+)
+
+
+def _local_hashtags(material: dict[str, object]) -> list[str]:
+    analysis = material.get("analysis")
+    analysis_text = ""
+    if isinstance(analysis, dict):
+        analysis_text = " ".join(str(value) for value in analysis.values())
+    haystack = " ".join(
+        str(value)
+        for value in (
+            material.get("cover_title", ""),
+            material.get("original_title", ""),
+            analysis_text,
+        )
+    ).lower()
+    hashtags: list[str] = []
+    for aliases, hashtag in _TOPIC_ALIASES:
+        if any(alias.lower() in haystack for alias in aliases):
+            hashtags.append(hashtag)
+    if isinstance(analysis, dict):
+        article_type = str(analysis.get("article_type", ""))
+        if "转会" in article_type or "transfer" in haystack:
+            hashtags.append("英超转会")
+        elif "战术" in article_type or "tactic" in haystack:
+            hashtags.append("英超战术")
+        elif "赛后" in article_type or "match" in haystack:
+            hashtags.append("比赛分析")
+    return _ensure_minimum_hashtags(hashtags)
+
+
+def _local_description(material: dict[str, object]) -> str:
+    analysis = material.get("analysis")
+    if isinstance(analysis, dict):
+        overview = _normalize_text(analysis.get("overview"))
+        if overview:
+            return overview
+    script = _normalize_text(material.get("script"))
+    script = re.sub(r"^欢迎收听英超每日观察，今天是[^，。]*，", "", script)
+    script = script.replace("感谢收听，更多内容请关注英超每日观察。", "").strip()
+    return script
+
+
+def generate_publish_copy(
+    output_dir: str,
+    llm: LLMClient | None = None,
+) -> dict[str, object]:
     """Generate Douyin title, description, and hashtags for an article output."""
     directory = Path(output_dir)
     material = _build_source_material(directory)
-    response = llm.complete(
-        _SYSTEM_PROMPT,
-        json.dumps(material, ensure_ascii=False),
-        json_mode=True,
-    )
-    data = _parse_response(response)
+    data: dict[str, object] = {}
+    if llm is not None:
+        response = llm.complete(
+            _SYSTEM_PROMPT,
+            json.dumps(material, ensure_ascii=False),
+            json_mode=True,
+            stage="publish-copy",
+            prompt_version=PROMPT_VERSION,
+        )
+        data = _parse_response(response)
 
     title = _normalize_title(material.get("cover_title"))
     if not title:
-        title = _normalize_title(data.get("title") or data.get("publish_title"))
+        analysis = material.get("analysis")
+        analysis_title = analysis.get("title_cn") if isinstance(analysis, dict) else ""
+        title = _normalize_title(
+            data.get("title")
+            or data.get("publish_title")
+            or analysis_title
+            or material.get("original_title")
+        )
     if not title:
-        raise ValueError("LLM did not return a publish title")
+        raise ValueError("No publish title found in article outputs")
 
-    description = _normalize_text(data.get("description"))
-    hashtags = _ensure_minimum_hashtags(_normalize_hashtags(data.get("hashtags")))
+    description = _normalize_text(data.get("description")) if llm is not None else _local_description(material)
+    hashtags = (
+        _ensure_minimum_hashtags(_normalize_hashtags(data.get("hashtags")))
+        if llm is not None
+        else _local_hashtags(material)
+    )
     description, description_with_hashtags = _fit_publish_text(description, hashtags)
     result = PublishCopy(
         title=title,

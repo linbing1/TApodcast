@@ -107,7 +107,7 @@ async def test_run_doctor_checks_includes_optional_online_checks(monkeypatch, tm
 
     assert report.passed
     assert len(report.checks) == 11
-    doctor.check_llm_online.assert_awaited_once()
+    doctor.check_llm_online.assert_awaited_once_with(tmp_path / "llm-usage.jsonl")
     doctor.check_tts_online.assert_awaited_once()
     doctor.check_article_access.assert_awaited_once_with(
         "https://example.com/article"

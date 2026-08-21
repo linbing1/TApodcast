@@ -281,13 +281,13 @@ PY
 | `finalize-content` 未通过 | 查看 `content-quality.json`、候选标题和候选稿；修复后强制重跑该阶段 | 把候选文件改名为正式文件 |
 | TTS 连接重置 | 等待内置重试；仍失败时从 `generate-audio` 重跑 | 伪造空音频或跳过字幕 |
 | 视频编码失败 | 保留 `frames/` 排查 FFmpeg、字体和字幕，修复后重跑 `video` | 删除唯一的故障现场后直接报告完成 |
-| 封面或发布文案失败 | 单独重跑 `cover` 或 `publish-copy` | 只交付部分产物却报告完整成功 |
+| 封面或发布文案失败 | 单独重跑 `cover` 或 `publish-copy`；必要时加 `--force` | 只交付部分产物却报告完整成功 |
 
 常用恢复命令：
 
 ```bash
 # 强制重新审校和定稿
-.venv/bin/python main.py run --url "$URL" --dir "$OUT" --resume \
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" \
   --force review-content --force finalize-content
 
 # 只重新生成音频
@@ -342,7 +342,7 @@ PY
 | 步骤 | 输入 | 主要处理 | 产物 |
 |------|------|----------|------|
 | 第一步：内容解析 | The Athletic 文章 URL | 提取主要文字、图片、原始图注和视频清单，分离图注与署名，确定封面主图并下载图片 | `page.json`、`text.txt`、`images/`、`images.json`、`videos.json`、`cover.json` |
-| 第二步：内容质量 + TTS | `page.json`、`images.json` | 提取可追踪事实，生成初稿，对照原文审校，最多自动修订两轮；通过质量门禁后翻译图注并生成约三分钟配音 | `analysis.json`、`script-draft.txt`、`content-review.json`、`content-quality.json`、`title.txt`、`script.txt`、`image_captions.json`、`audio.mp3`、`audio.vtt` |
+| 第二步：内容质量 + TTS | `page.json`、`images.json` | 提取可追踪事实、生成初稿；低风险文章走本地静态门禁，高风险文章才调用 LLM 审校；仅事实错误或 critical 事实遗漏默认自动修订一轮；通过质量门禁后翻译图注并生成约三分钟配音 | `analysis.json`、`script-draft.txt`、`content-review.json`、`content-quality.json`、`title.txt`、`script.txt`、`image_captions.json`、`audio.mp3`、`audio.vtt` |
 | 第三步：视频合成 | `images/`、`image_captions.json`、`audio.mp3`、`audio.vtt` | 按图片路径匹配中文图注，生成图片轮播并烧录黄色口播字幕 | `subtitles.ass`、`<中文标题>.mp4` |
 | 第四步：封面生成 | 封面主图和 `title.txt` | 生成带栏目标签、当前日期和中文标题的竖版与横版独立封面 | `cover.png`、`cover-landscape.png` |
 | 第五步：发布文案 | `page.json`、`analysis.json`、`script.txt`、`title.txt` | 整理不超过30字的抖音标题，并生成作品简介和相关话题 | `publish.json`、`publish_title.txt`、`publish_description.txt` |
@@ -370,6 +370,7 @@ playwright install chromium
 | `ATHLETIC_COOKIES` | 是 | The Athletic 登录 Cookie（JSON 数组，从浏览器插件导出） |
 | `LLM_BASE_URL` | 否 | 默认 `https://api.deepseek.com/v1` |
 | `LLM_MODEL` | 否 | 默认 `deepseek-v4-flash` |
+| `LLM_MAX_REQUESTS_PER_ARTICLE` | 否 | 单篇文章最多实际访问 LLM 的逻辑请求数，默认 `12`；缓存命中不计入 |
 | `TTS_VOICE` | 否 | 默认 `zh-CN-YunjianNeural`（男声） |
 | `TTS_RATE` | 否 | 语速，默认 `+10%`（约 1.1 倍） |
 | `CJK_FONT_PATH` | 否 | 视频字幕和封面使用的中文字体文件 |
@@ -446,16 +447,16 @@ Cookie 导出推荐使用 [Cookie-Editor](https://cookie-editor.com/) 浏览器�
 
 ### 断点续跑和阶段控制
 
-建议通过 `--dir` 固定文章输出目录，这样即使跨天重试，也会继续使用同一个 `manifest.json`：
+建议通过 `--dir` 固定文章输出目录，这样即使跨天重试，也会继续使用同一个 `manifest.json`。当目录中已有 `manifest.json` 时，`run` 默认自动续跑；新目录则从第一个未完成阶段开始：
 
 ```bash
 URL="https://www.nytimes.com/athletic/ARTICLE_ID/..."
 OUT="output/YYYY-MM-DD/<article-slug>"
 
-.venv/bin/python main.py run --url "$URL" --dir "$OUT" --resume
+.venv/bin/python main.py run --url "$URL" --dir "$OUT"
 ```
 
-`--resume` 只跳过状态为 `completed`，且输入、输出文件哈希、相关模型配置和提示词版本均未变化的阶段。输出缺失、文件被修改、上游输入发生变化，或相关模型/提示词版本升级时，对应阶段会自动重新执行。
+`--resume` 仍可显式表达同样的行为；`--no-resume` 用于明确要求本次不跳过已完成阶段。无论哪种方式，只有状态为 `completed`，且输入、输出文件哈希、相关模型配置和提示词版本均未变化的阶段才会跳过。输出缺失、文件被修改、上游输入发生变化，或相关模型/提示词版本升级时，对应阶段会自动重新执行。
 
 可以限制执行范围：
 
@@ -475,14 +476,14 @@ OUT="output/YYYY-MM-DD/<article-slug>"
 可以在断点续跑时强制重跑指定阶段；`--force` 可以重复使用：
 
 ```bash
-.venv/bin/python main.py run --url "$URL" --dir "$OUT" --resume \
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" \
   --force generate-audio --force video
 ```
 
 执行前查看计划而不修改文件：
 
 ```bash
-.venv/bin/python main.py run --url "$URL" --dir "$OUT" --resume --dry-run
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" --dry-run
 ```
 
 当前可用阶段名为：`extract`、`download-images`、`analyze-content`、`write-script`、`review-content`、`finalize-content`、`generate-audio`、`video`、`cover`、`publish-copy`。单独执行这些分步骤命令时也会更新同一个 `manifest.json`。
@@ -523,9 +524,20 @@ videos.json    # 视频、iframe 或 JSON-LD 视频清单
 
 如果某篇文章是在加入图片图注功能之前抓取的，旧的 `page.json` 或 `images.json` 可能只有部分图注。此时需要对原 URL 重新执行本步骤的 `extract` 和 `download-images`，再继续执行第二、三步。
 
-### 第二步：内容审校并生成音频
+### 第二步：内容审校
 
-兼容命令会从内容分析开始，依次完成事实提取、初稿生成、原文审校、自动修订、图片图注翻译和 TTS：
+先完成事实提取、初稿生成、原文审校和自动修订：
+
+```bash
+.venv/bin/python main.py run \
+  --url "https://www.nytimes.com/athletic/ARTICLE_ID/..." \
+  --dir "output/YYYY-MM-DD/<article-slug>" \
+  --from analyze-content --to finalize-content
+```
+
+### 第三步：生成音频
+
+`generate-audio` 是纯下游阶段，只读取已经通过质量门禁的 `script.txt` 和已下载的 `images.json`，不会重新执行文章分析、播报稿生成、内容审校或自动修订：
 
 ```bash
 .venv/bin/python main.py generate-audio \
@@ -535,29 +547,27 @@ videos.json    # 视频、iframe 或 JSON-LD 视频清单
 该步骤不处理视频或 ffmpeg 合成，会生成：
 
 ```text
-analysis.json          # LLM 结构化分析、初始标题及可追踪 source_facts
-script-draft.txt       # 未经审校的第一版口播稿
-content-review.json    # 第一轮结构化审校结果
-content-quality.json   # 初始/最终标题、历次修订、评分、问题和最终审校结果
-title.txt              # 通过质量门禁的最终中文标题
-script.txt             # 通过质量门禁的最终口播稿
 image_captions.json    # 图片本地路径、原始英文说明和精简中文图注
 audio.mp3              # TTS 音频
 audio.vtt              # TTS 时间字幕
 ```
 
-内容质量流程可以独立执行，方便只重跑有问题的阶段：
+内容质量流程可以独立执行，方便只重跑有问题的阶段；这些命令默认复用未变化的阶段，强制重跑时加 `--force`：
 
 ```bash
-.venv/bin/python main.py analyze-content --dir "$OUT"
+.venv/bin/python main.py analyze-content --dir "$OUT" --force
 .venv/bin/python main.py write-script --dir "$OUT"
 .venv/bin/python main.py review-content --dir "$OUT"
 .venv/bin/python main.py finalize-content --dir "$OUT"
 ```
 
-`analysis.json` 中的 `source_facts` 为每条事实分配 `F001` 形式的编号，并保存中文事实、原文依据、类别和重要级别。审校器会逐项检查所有 `critical` 事实，以及人物、俱乐部、数字、金额、日期、引语归属、因果关系和不确定性措辞。
+`analysis.json` 中的 `source_facts` 为每条事实分配 `F001` 形式的编号，并保存中文事实、原文依据、类别和重要级别。流程会先用本地规则判断文章风险：转会、合同、金额、法律争议、纪律争议、传闻、不确定性、重大伤病或事故等文章标记为高风险；没有这些信号的文章标记为低风险。低风险文章由本地事实覆盖、数字/金额、不确定性措辞、格式和长度规则完成审校，不调用 LLM；高风险文章才调用 LLM，逐项检查所有 `critical` 事实，以及人物、俱乐部、数字、金额、日期、引语归属、因果关系和不确定性措辞。
 
-质量门禁要求事实准确度至少 90、完整度至少 85、结构/口语性/标题质量至少 80、总分至少 85，且不能存在 `error` 或 `blocker`。未通过时最多自动修订两轮，标题和播报稿会一起修正；仍未通过则停止后续 TTS 和视频生成，保留 `content-quality.json`、`title-candidate.txt` 和 `script-candidate.txt` 供人工检查。最终 `title.txt` 和 `script.txt` 只在质量门禁通过后生成。
+`content-review.json` 会记录 `review_mode`（`static` 或 `llm`）、`risk_level`（`low` 或 `high`）和 `risk_reasons`，便于确认某篇文章是否实际消耗了审校调用。审校和重写请求只发送文章标题、URL、`source_facts`、精简分析摘要、标题、当前播报稿和审校报告，不重复发送完整原文；完整原文仍保存在本地 `page.json`/`text.txt`，供流程追溯。
+
+质量门禁要求事实准确度至少 90、完整度至少 85、结构/口语性/标题质量至少 80、总分至少 85，且不能存在 `error` 或 `blocker`。未通过时默认最多自动修订一轮，且只有事实准确度错误/阻断问题，或明确关联 `critical` 事实的完整度错误/阻断问题，才会触发 LLM 重写；纯格式、风格、标题吸引力或缺少事实清单的问题不会盲目重写，会保留报告供人工处理或重新运行上游分析。修订后仍未通过则停止后续 TTS 和视频生成，保留 `content-quality.json`、`title-candidate.txt` 和 `script-candidate.txt` 供人工检查。最终 `title.txt` 和 `script.txt` 只在质量门禁通过后生成。
+
+每篇文章的 LLM 请求会记录到 `llm-usage.jsonl`，成功响应会缓存到 `.llm-cache/`。缓存 Key 包含模型、阶段、提示词版本和完整输入；缓存命中不会访问 API，也不计入 `LLM_MAX_REQUESTS_PER_ARTICLE`。达到预算后流程会停止并保留当前失败阶段，避免无限重试。
 
 播报稿以 850–950 个汉字、约 3 分钟口播为目标，超长时会自动压缩；规定的节目开头、结尾、长度和 Markdown 污染同时由确定性规则检查，不完全依赖 LLM 自评。
 
@@ -569,7 +579,7 @@ audio.vtt              # TTS 时间字幕
 - 以 `local_path` 作为图片与中文图注的稳定映射，下载失败的图片不会进入视频；
 - 原图文件不会被修改，中文图注单独保存在 `image_captions.json`。
 
-### 第三步：生成抖音竖屏视频
+### 第四步：生成抖音竖屏视频
 
 从已经下载的图片、音频和 `audio.vtt` 生成固定规格的视频：
 
@@ -596,7 +606,7 @@ audio.vtt              # TTS 时间字幕
 
 如果系统中有多个 ffmpeg，可通过 `FFMPEG_BIN` 指定带 `ass` 和 `subtitles` 滤镜的可执行文件；中文字幕字体可通过 `CJK_FONT_PATH` 指定。
 
-### 第四步：生成抖音封面
+### 第五步：生成抖音封面
 
 封面独立于视频生成，默认读取 `title.txt` 和第一步解析得到的封面候选，从 `images/` 生成 `1080×1920` 的竖版 `cover.png` 和 `1920×1080` 的横版 `cover-landscape.png`：
 
@@ -641,9 +651,9 @@ audio.vtt              # TTS 时间字幕
 
 封面标题读取 `title.txt`。该标题由第二步的 LLM 生成，限制为不超过30个汉字，并同时作为第五步的抖音作品标题。这样封面标题和发布页标题保持一致。
 
-### 第五步：生成抖音发布内容
+### 第六步：生成抖音发布内容
 
-从文章正文分析、中文口播稿和第二步生成的标题整理抖音发布页需要填写的内容：
+从文章正文分析、中文口播稿和内容阶段生成的标题整理抖音发布页需要填写的内容。默认使用本地模板，不调用 LLM：
 
 ```bash
 .venv/bin/python main.py publish-copy \
@@ -694,24 +704,27 @@ OUT="output/YYYY-MM-DD/<article-slug>"
 .venv/bin/python main.py extract --url "$URL" --dir "$OUT"
 .venv/bin/python main.py download-images --dir "$OUT"
 
-# 第二步：运行完整内容质量流程并生成 TTS 和字幕
+# 第二步：运行内容质量流程
+.venv/bin/python main.py run --url "$URL" --dir "$OUT" \
+  --from analyze-content --to finalize-content
+
+# 第三步：只生成图片图注、TTS 音频和时间字幕
 .venv/bin/python main.py generate-audio --dir "$OUT"
 
-# 如需逐阶段排查，也可以替换上一条命令：
+# 如需逐阶段排查，也可以替换内容质量命令：
 # .venv/bin/python main.py analyze-content --dir "$OUT"
 # .venv/bin/python main.py write-script --dir "$OUT"
 # .venv/bin/python main.py review-content --dir "$OUT"
 # .venv/bin/python main.py finalize-content --dir "$OUT"
-# .venv/bin/python main.py run --url "$URL" --dir "$OUT" \
-#   --from generate-audio --to generate-audio
+# .venv/bin/python main.py generate-audio --dir "$OUT" --force
 
-# 第三步：生成带逐图中文图注和口播字幕的抖音竖屏视频
+# 第四步：生成带逐图中文图注和口播字幕的抖音竖屏视频
 .venv/bin/python main.py video --dir "$OUT"
 
-# 第四步：生成独立封面
+# 第五步：生成独立封面
 .venv/bin/python main.py cover --dir "$OUT"
 
-# 第五步：生成抖音标题、作品简介和话题
+# 第六步：本地生成抖音标题、作品简介和话题
 .venv/bin/python main.py publish-copy --dir "$OUT"
 
 # 可选：清理渲染中断或失败残留的中间帧
@@ -726,6 +739,8 @@ output/
     └── liverpool-transfer-summer-window-analysis/
         ├── images/          # 从文章下载的图片
         ├── manifest.json    # 流程阶段状态、耗时和输入输出哈希
+        ├── llm-usage.jsonl  # 每次 LLM 请求、缓存命中、Token 和预算记录
+        ├── .llm-cache/      # 当前文章的成功 LLM 响应缓存
         ├── page.json        # 正文、图片原始图注、视频及封面候选
         ├── images.json      # 下载状态和图片原始元数据
         ├── videos.json      # 文章视频资源清单（不下载视频）

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -16,6 +17,37 @@ from playwright.async_api import async_playwright
 from src.scraper import extract_page_content
 from src.subtitle_renderer import find_cjk_font
 from src.video_assembler import find_ffmpeg
+
+
+def _record_online_llm_usage(
+    usage_path: str | Path | None,
+    *,
+    model: str,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    error: str | None = None,
+) -> None:
+    if usage_path is None:
+        return
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event": "doctor_request",
+        "stage": "doctor-online",
+        "prompt_version": "doctor-v1",
+        "model": model,
+        "cache_key": "",
+        "attempts": 1,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+    if error:
+        record["error"] = error
+    path = Path(usage_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as target:
+        target.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 @dataclass(frozen=True)
@@ -196,7 +228,7 @@ def check_font() -> CheckResult:
     return _result("Chinese font", "pass", font_path)
 
 
-async def check_llm_online() -> CheckResult:
+async def check_llm_online(usage_path: str | Path | None = None) -> CheckResult:
     config_result = check_llm_config()
     if config_result.status == "fail":
         return _result("LLM connectivity", "fail", config_result.detail)
@@ -218,7 +250,16 @@ async def check_llm_online() -> CheckResult:
             data = response.json()
             if not data.get("choices"):
                 raise ValueError("response does not contain choices")
+            usage = data.get("usage") or {}
+            _record_online_llm_usage(
+                usage_path,
+                model=model,
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+                total_tokens=usage.get("total_tokens"),
+            )
     except Exception as error:
+        _record_online_llm_usage(usage_path, model=model, error=str(error))
         return _result("LLM connectivity", "fail", str(error))
     return _result("LLM connectivity", "pass", f"Connected with model {model}")
 
@@ -278,7 +319,8 @@ async def run_doctor_checks(
         check_font(),
     ]
     if online:
-        checks.extend([await check_llm_online(), await check_tts_online()])
+        usage_path = Path(output_dir) / "llm-usage.jsonl"
+        checks.extend([await check_llm_online(usage_path), await check_tts_online()])
     if article_url:
         checks.append(await check_article_access(article_url))
     return DoctorReport(checks)

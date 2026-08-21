@@ -25,6 +25,7 @@ class PipelineContext:
     cover_orientation: str = "both"
     configuration: dict[str, str] = field(default_factory=dict)
     prompt_versions: dict[str, str] = field(default_factory=dict)
+    llm_cache_enabled: bool = True
 
 
 PathResolver = Callable[[PipelineContext], list[str]]

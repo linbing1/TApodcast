@@ -7,7 +7,7 @@ class StubLLM:
     def __init__(self):
         self.calls = []
 
-    def complete(self, system, user, json_mode=False):
+    def complete(self, system, user, json_mode=False, **kwargs):
         self.calls.append((system, user, json_mode))
         return json.dumps({
             "captions": [

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 
 from pydantic import ValidationError
@@ -13,6 +14,7 @@ from src.models import (
     ContentRevision,
     PodcastScript,
     QualityIssue,
+    QualityScores,
     ScrapedArticle,
 )
 from src.script_writer import (
@@ -22,9 +24,9 @@ from src.script_writer import (
 )
 
 
-REVIEW_PROMPT_VERSION = "content-reviewer-v2"
-REWRITE_PROMPT_VERSION = "content-rewriter-v2"
-MAX_REVISIONS = 2
+REVIEW_PROMPT_VERSION = "content-reviewer-v3"
+REWRITE_PROMPT_VERSION = "content-rewriter-v3"
+MAX_REVISIONS = 1
 
 _SCORE_THRESHOLDS = {
     "factual_accuracy": 90,
@@ -36,11 +38,98 @@ _SCORE_THRESHOLDS = {
 }
 _REQUIRED_OPENING = "欢迎收听英超每日观察，今天是"
 _REQUIRED_ENDING = "感谢收听，更多内容请关注英超每日观察。"
+_FACT_CONNECTORS = (
+    "在",
+    "的",
+    "了",
+    "将",
+    "与",
+    "和",
+    "并",
+    "是",
+    "被",
+    "向",
+    "对",
+    "从",
+    "到",
+    "为",
+    "于",
+    "也",
+    "还",
+    "已",
+    "中",
+    "其",
+    "后",
+    "前",
+    "当",
+    "由",
+)
+_UNCERTAINTY_MARKERS = (
+    "可能",
+    "或许",
+    "预计",
+    "有意",
+    "考虑",
+    "传闻",
+    "据报道",
+    "据称",
+    "据悉",
+    "尚未",
+    "未确认",
+    "potential",
+    "reported",
+    "rumor",
+    "rumour",
+    "could",
+    "may",
+    "likely",
+)
+_HIGH_RISK_PATTERNS = (
+    (
+        "转会或合同",
+        re.compile(r"转会|签约|续约|租借|\b(?:transfer\w*|contract\w*)\b", re.I),
+    ),
+    (
+        "金额或投资",
+        re.compile(
+            r"金额|身价|费用|投资|股权|收购|出售|\b(?:sale|investment|fee|million|billion)\b|[£€$]",
+            re.I,
+        ),
+    ),
+    (
+        "调查或法律争议",
+        re.compile(
+            r"调查|诉讼|法律|\b(?:investigation|lawsuit|legal|allegation)\b",
+            re.I,
+        ),
+    ),
+    (
+        "纪律或规则争议",
+        re.compile(
+            r"红牌|停赛|裁判|规则|处罚|禁赛|\b(?:red card|suspension|referee|rule)\b",
+            re.I,
+        ),
+    ),
+    (
+        "不确定性或传闻",
+        re.compile(
+            r"可能|传闻|据报道|据称|有意|考虑|\b(?:potential|reported|rumou?r|could|likely)\b",
+            re.I,
+        ),
+    ),
+    (
+        "重大伤病或事故",
+        re.compile(
+            r"伤病|受伤|死亡|事故|\b(?:injur\w*|accident|died|illness)\b",
+            re.I,
+        ),
+    ),
+)
 
 _REVIEW_SYSTEM_PROMPT = """你是一位严谨的中文体育内容总编，负责检查短视频播报稿是否忠实、完整、清晰且适合口播。
 
 审校原则：
-1. 原文是唯一事实来源。不得用常识补充原文没有的信息。
+1. source_facts 是事实核对的主依据。不得用常识补充 source_facts 没有的信息。
 2. 逐项核对 source_facts，所有 importance=critical 的事实都必须准确覆盖。
 3. 检查人物、俱乐部、金额、日期、数字、引语归属、因果关系和不确定性措辞。
 4. 区分原文事实、原文观点和未来推测，不得把传闻写成已发生事实。
@@ -117,7 +206,101 @@ def _normalize_title(value: object, fallback: str) -> str:
     return title or fallback
 
 
-def _static_issues(analyzed: AnalyzedArticle, script: str) -> list[QualityIssue]:
+def _normalize_match_text(value: str) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff%£€$¥]+", "", value.lower())
+
+
+def _fact_segments(claim: str) -> list[str]:
+    connector_pattern = "|".join(map(re.escape, _FACT_CONNECTORS))
+    raw_segments = re.split(rf"(?:{connector_pattern}|[^0-9a-z\u4e00-\u9fff]+)+", claim.lower())
+    return [segment for segment in raw_segments if len(segment) >= 2]
+
+
+def _segment_covered(segment: str, script: str) -> bool:
+    if segment in script:
+        return True
+    if len(segment) < 4:
+        return False
+    bigrams = [segment[index : index + 2] for index in range(len(segment) - 1)]
+    matched = sum(bigram in script for bigram in bigrams)
+    return matched >= max(1, round(len(bigrams) * 0.3))
+
+
+def _fact_is_covered(claim: str, script: str) -> bool:
+    normalized_claim = _normalize_match_text(claim)
+    if not normalized_claim:
+        return True
+    if normalized_claim in script:
+        return True
+    segments = _fact_segments(claim)
+    if not segments:
+        return True
+    covered = sum(_segment_covered(segment, script) for segment in segments)
+    return covered >= max(1, (len(segments) + 1) // 2)
+
+
+def _numeric_markers(value: str) -> set[str]:
+    return {
+        marker.lower().replace(",", "")
+        for marker in re.findall(
+            r"(?:[£€$¥]\s*)?\d+(?:,\d{3})*(?:\.\d+)?(?:%|万|亿|m|bn|million|billion)?",
+            value.lower(),
+        )
+    }
+
+
+def _has_uncertainty_marker(value: str) -> bool:
+    normalized = value.lower()
+    for marker in _UNCERTAINTY_MARKERS:
+        if marker == "may":
+            for match in re.finditer(r"\bmay\b", normalized):
+                following = normalized[match.end() :].lstrip()
+                preceding = normalized[: match.start()].rstrip()
+                if re.match(r"\d{1,4}\b", following):
+                    continue
+                if re.search(r"\b(?:in|on|by|during|from|until)$", preceding):
+                    continue
+                return True
+            continue
+        if marker.isascii() and any(character.isalpha() for character in marker):
+            if re.search(rf"\b{re.escape(marker)}\b", normalized, re.I):
+                return True
+        elif marker in normalized:
+            return True
+    return False
+
+
+def assess_article_risk(
+    article: ScrapedArticle,
+    analyzed: AnalyzedArticle,
+) -> tuple[str, ...]:
+    material = " ".join(
+        (
+            article.title,
+            analyzed.article_type,
+            analyzed.overview,
+            analyzed.detail,
+            analyzed.key_people_and_data,
+            analyzed.impact,
+            article.full_text,
+        )
+    )
+    reasons = [label for label, pattern in _HIGH_RISK_PATTERNS if pattern.search(material)]
+    for fact in analyzed.source_facts:
+        if fact.importance != "critical":
+            continue
+        if _numeric_markers(fact.claim):
+            reasons.append("critical事实包含数字或金额")
+        if _has_uncertainty_marker(fact.claim):
+            reasons.append("critical事实包含不确定性")
+    return tuple(dict.fromkeys(reasons))
+
+
+def _static_issues(
+    article: ScrapedArticle,
+    analyzed: AnalyzedArticle,
+    script: str,
+) -> list[QualityIssue]:
     issues: list[QualityIssue] = []
     if not analyzed.title_cn.strip():
         issues.append(
@@ -146,6 +329,61 @@ def _static_issues(analyzed: AnalyzedArticle, script: str) -> list[QualityIssue]
                 suggestion="重新分析文章并标记播报稿必须覆盖的核心事实。",
             )
         )
+    else:
+        normalized_script = _normalize_match_text(script)
+        critical_ids = {
+            fact.fact_id for fact in analyzed.source_facts if fact.importance == "critical"
+        }
+        for fact in analyzed.source_facts:
+            if _fact_is_covered(fact.claim, normalized_script):
+                missing_numbers = _numeric_markers(fact.claim) - _numeric_markers(script)
+                if missing_numbers:
+                    issues.append(
+                        QualityIssue(
+                            dimension="factual_accuracy",
+                            severity="error" if fact.fact_id in critical_ids else "warning",
+                            description=(
+                                f"{fact.fact_id} 的数字、金额或比例未在播报稿中保持一致。"
+                            ),
+                            evidence=fact.claim,
+                            suggestion="保留原文中的数字、金额或比例，不要改写或省略。",
+                            fact_ids=[fact.fact_id],
+                        )
+                    )
+                if fact.importance == "critical" and _has_uncertainty_marker(fact.claim):
+                    if not _has_uncertainty_marker(script):
+                        issues.append(
+                            QualityIssue(
+                                dimension="factual_accuracy",
+                                severity="error",
+                                description=f"{fact.fact_id} 的不确定性语气在播报稿中丢失。",
+                                evidence=fact.claim,
+                                suggestion="保留可能、据报道、尚未确认等不确定性表达。",
+                                fact_ids=[fact.fact_id],
+                            )
+                        )
+            elif fact.importance == "critical":
+                issues.append(
+                    QualityIssue(
+                        dimension="completeness",
+                        severity="error",
+                        description=f"{fact.fact_id} 这条 critical 原文事实没有被播报稿充分覆盖。",
+                        evidence=fact.claim,
+                        suggestion="补回该事实的核心人物、事件、数字和状态。",
+                        fact_ids=[fact.fact_id],
+                    )
+                )
+            else:
+                issues.append(
+                    QualityIssue(
+                        dimension="completeness",
+                        severity="warning",
+                        description=f"{fact.fact_id} 这条 supporting 原文事实可能未被覆盖。",
+                        evidence=fact.claim,
+                        suggestion="如字数允许，补充该背景事实。",
+                        fact_ids=[fact.fact_id],
+                    )
+                )
     if not script.strip():
         issues.append(
             QualityIssue(
@@ -232,19 +470,95 @@ def evaluate_quality_gate(review: ContentReview) -> QualityGateResult:
     )
 
 
+def _static_scores(issues: list[QualityIssue]) -> QualityScores:
+    values = {
+        "factual_accuracy": 100,
+        "completeness": 100,
+        "structure": 100,
+        "spoken_style": 100,
+        "title_quality": 100,
+        "overall": 100,
+    }
+    for issue in issues:
+        if issue.severity == "warning":
+            continue
+        score = 0 if issue.severity == "blocker" else 70
+        if issue.dimension in values:
+            values[issue.dimension] = min(values[issue.dimension], score)
+        values["overall"] = min(values["overall"], score)
+    return QualityScores(**values)
+
+
+def _build_static_review(
+    article: ScrapedArticle,
+    analyzed: AnalyzedArticle,
+    script: PodcastScript,
+    risk_reasons: tuple[str, ...],
+) -> ContentReview:
+    issues = _static_issues(article, analyzed, script.text)
+    review = ContentReview(
+        passed=False,
+        scores=_static_scores(issues),
+        issues=issues,
+        summary="低风险文章使用本地事实与格式门禁，未调用 LLM 审校。",
+        review_mode="static",
+        risk_level="low",
+        risk_reasons=list(risk_reasons),
+        source_sha256=_content_hash(article.full_text),
+        title_sha256=_content_hash(analyzed.title_cn),
+        script_sha256=_content_hash(script.text),
+    )
+    gate = evaluate_quality_gate(review)
+    review.passed = gate.passed
+    if gate.failed_thresholds:
+        failed = "、".join(gate.failed_thresholds)
+        review.summary = f"{review.summary} 未达到质量阈值：{failed}。"
+    if not issues:
+        review.summary = f"{review.summary} 本地检查通过。"
+    return review
+
+
+def _should_auto_rewrite(
+    review: ContentReview,
+    analyzed: AnalyzedArticle,
+) -> bool:
+    critical_ids = {
+        fact.fact_id for fact in analyzed.source_facts if fact.importance == "critical"
+    }
+    for issue in review.issues:
+        if issue.severity not in {"error", "blocker"}:
+            continue
+        if issue.dimension == "factual_accuracy":
+            return True
+        if issue.dimension == "completeness" and critical_ids.intersection(
+            issue.fact_ids
+        ):
+            return True
+    return False
+
+
 def review_content(
     article: ScrapedArticle,
     analyzed: AnalyzedArticle,
     script: PodcastScript,
     llm: LLMClient,
 ) -> ContentReview:
+    risk_reasons = assess_article_risk(article, analyzed)
+    if not risk_reasons:
+        return _build_static_review(article, analyzed, script, risk_reasons)
+
     payload = {
         "source": {
             "title": article.title,
             "url": article.link,
-            "full_text": article.full_text,
         },
-        "analysis": analyzed.model_dump(mode="json"),
+        "source_facts": [fact.model_dump(mode="json") for fact in analyzed.source_facts],
+        "analysis_summary": {
+            "article_type": analyzed.article_type,
+            "overview": analyzed.overview,
+            "key_people_and_data": analyzed.key_people_and_data,
+            "impact": analyzed.impact,
+        },
         "title_cn": analyzed.title_cn,
         "script": script.text,
     }
@@ -252,11 +566,16 @@ def review_content(
         _REVIEW_SYSTEM_PROMPT,
         json.dumps(payload, ensure_ascii=False),
         json_mode=True,
+        stage="review-content",
+        prompt_version=REVIEW_PROMPT_VERSION,
     )
     data = _parse_json_object(response)
     data.setdefault("passed", False)
     data.setdefault("issues", [])
     data.setdefault("summary", "")
+    data["review_mode"] = "llm"
+    data["risk_level"] = "high"
+    data["risk_reasons"] = list(risk_reasons)
     data["source_sha256"] = _content_hash(article.full_text)
     data["title_sha256"] = _content_hash(analyzed.title_cn)
     data["script_sha256"] = _content_hash(script.text)
@@ -267,7 +586,7 @@ def review_content(
             f"Invalid content review response: {response[:200]}"
         ) from error
 
-    review.issues.extend(_static_issues(analyzed, script.text))
+    review.issues.extend(_static_issues(article, analyzed, script.text))
     gate = evaluate_quality_gate(review)
     review.passed = gate.passed
     if gate.failed_thresholds:
@@ -290,9 +609,14 @@ def rewrite_content(
         "source": {
             "title": article.title,
             "url": article.link,
-            "full_text": article.full_text,
         },
-        "analysis": analyzed.model_dump(mode="json"),
+        "source_facts": [fact.model_dump(mode="json") for fact in analyzed.source_facts],
+        "analysis_summary": {
+            "article_type": analyzed.article_type,
+            "overview": analyzed.overview,
+            "key_people_and_data": analyzed.key_people_and_data,
+            "impact": analyzed.impact,
+        },
         "current_script": script.text,
         "review": review.model_dump(mode="json"),
     }
@@ -300,6 +624,8 @@ def rewrite_content(
         _REWRITE_SYSTEM_PROMPT.format(date_str=date_str or "今天"),
         json.dumps(payload, ensure_ascii=False),
         json_mode=True,
+        stage="finalize-content",
+        prompt_version=REWRITE_PROMPT_VERSION,
     )
     data = _parse_json_object(response)
     title = _normalize_title(data.get("title_cn"), analyzed.title_cn)
@@ -307,7 +633,12 @@ def rewrite_content(
     if not isinstance(script_value, str) or not script_value.strip():
         raise ValueError(f"Content rewrite response is missing script: {response[:200]}")
     script = PodcastScript(
-        text=fit_script_length(script_value, llm, facts=analyzed.source_facts)
+        text=fit_script_length(
+            script_value,
+            llm,
+            facts=analyzed.source_facts,
+            stage="finalize-content",
+        )
     )
     return title, script
 
@@ -335,7 +666,7 @@ def finalize_content(
         current_review = review_content(article, analyzed, current_script, llm)
 
     for attempt in range(1, max_revisions + 1):
-        if current_review.passed:
+        if current_review.passed or not _should_auto_rewrite(current_review, analyzed):
             break
         current_analysis = analyzed.model_copy(update={"title_cn": current_title})
         current_title, current_script = rewrite_content(

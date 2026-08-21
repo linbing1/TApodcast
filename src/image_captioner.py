@@ -93,6 +93,8 @@ def generate_image_captions(output_dir: str, llm: LLMClient) -> list[dict[str, s
             _SYSTEM_PROMPT,
             json.dumps({"images": candidates}, ensure_ascii=False),
             json_mode=True,
+            stage="generate-audio",
+            prompt_version=PROMPT_VERSION,
         )
         translated = _parse_response(response)
         for index, caption in translated.items():

@@ -33,6 +33,14 @@ def _article() -> ScrapedArticle:
     )
 
 
+def _high_risk_article() -> ScrapedArticle:
+    return ScrapedArticle(
+        title="Arsenal transfer fee reported",
+        link="https://example.com/article",
+        full_text="Arsenal are considering a transfer fee of £50 million, according to reports.",
+    )
+
+
 def _analyzed() -> AnalyzedArticle:
     return AnalyzedArticle(
         title_cn="阿森纳主场取胜",
@@ -112,7 +120,7 @@ def test_review_passes_when_scores_and_static_rules_pass():
     llm = MagicMock()
     llm.complete.return_value = _review_response()
 
-    result = review_content(_article(), _analyzed(), _script(), llm)
+    result = review_content(_high_risk_article(), _analyzed(), _script(), llm)
 
     assert result.passed is True
     assert result.scores.overall == 92
@@ -121,9 +129,11 @@ def test_review_passes_when_scores_and_static_rules_pass():
     assert len(result.script_sha256) == 64
     request = json.loads(llm.complete.call_args.args[1])
     system_prompt = llm.complete.call_args.args[0]
-    assert request["analysis"]["source_facts"][0]["fact_id"] == "F001"
+    assert request["source_facts"][0]["fact_id"] == "F001"
     assert request["title_cn"] == "阿森纳主场取胜"
-    assert request["source"]["full_text"].startswith("Arsenal won")
+    assert "full_text" not in request["source"]
+    assert result.review_mode == "llm"
+    assert result.risk_level == "high"
     assert "节目制作元数据" in system_prompt
 
 
@@ -131,7 +141,7 @@ def test_review_rejects_low_scores_even_if_llm_marks_passed():
     llm = MagicMock()
     llm.complete.return_value = _review_response(overall=70)
 
-    result = review_content(_article(), _analyzed(), _script(), llm)
+    result = review_content(_high_risk_article(), _analyzed(), _script(), llm)
 
     assert result.passed is False
     assert "overall" in result.summary
@@ -160,7 +170,7 @@ def test_finalize_rewrites_and_reviews_until_quality_gate_passes():
     ]
 
     final_title, final_script, report = finalize_content(
-        _article(),
+        _high_risk_article(),
         _analyzed(),
         PodcastScript(text="不合格初稿"),
         _failed_review(),
@@ -199,12 +209,13 @@ def test_finalize_preserves_review_history_when_gate_never_passes():
     ]
 
     _, _, report = finalize_content(
-        _article(),
+        _high_risk_article(),
         _analyzed(),
         PodcastScript(text="不合格初稿"),
         _failed_review(),
         llm,
         date_str="2026年8月18日",
+        max_revisions=2,
     )
 
     assert report.passed is False
@@ -243,4 +254,77 @@ def test_finalize_rechecks_a_stale_passing_review():
     assert final_title == _analyzed().title_cn
     assert final_script.text == _script().text
     assert report.final_review.script_sha256 != "old-script"
-    llm.complete.assert_called_once()
+    llm.complete.assert_not_called()
+    assert report.final_review.review_mode == "static"
+
+
+def test_low_risk_article_uses_static_gate_without_llm():
+    llm = MagicMock()
+
+    result = review_content(_article(), _analyzed(), _script(), llm)
+
+    assert result.passed is True
+    assert result.review_mode == "static"
+    assert result.risk_level == "low"
+    llm.complete.assert_not_called()
+
+
+def test_month_name_does_not_trigger_high_risk_review():
+    llm = MagicMock()
+    article = _article().model_copy(update={"full_text": "Arsenal won at home in May."})
+
+    result = review_content(article, _analyzed(), _script(), llm)
+
+    assert result.review_mode == "static"
+    llm.complete.assert_not_called()
+
+
+def test_missing_fact_ids_do_not_trigger_an_automatic_rewrite():
+    llm = MagicMock()
+    analyzed = _analyzed().model_copy(update={"source_facts": []})
+    initial_review = review_content(_article(), analyzed, _script(), llm)
+
+    finalize_content(
+        _article(),
+        analyzed,
+        _script(),
+        initial_review,
+        llm,
+        date_str="2026年8月18日",
+    )
+
+    llm.complete.assert_not_called()
+
+
+def test_default_finalize_performs_at_most_one_revision():
+    llm = MagicMock()
+    revised_script = _script().text
+    failing_response = _review_response(
+        issues=[
+            {
+                "dimension": "factual_accuracy",
+                "severity": "error",
+                "description": "数字与原文不一致。",
+                "evidence": "错误数字",
+                "suggestion": "按原文修正。",
+                "fact_ids": ["F001"],
+            }
+        ]
+    )
+    llm.complete.side_effect = [
+        _rewrite_response(script=revised_script),
+        failing_response,
+    ]
+
+    _, _, report = finalize_content(
+        _high_risk_article(),
+        _analyzed(),
+        PodcastScript(text="不合格初稿"),
+        _failed_review(),
+        llm,
+        date_str="2026年8月18日",
+    )
+
+    assert report.passed is False
+    assert len(report.revisions) == 1
+    assert llm.complete.call_count == 2

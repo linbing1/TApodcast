@@ -72,9 +72,19 @@ def write_script(article: AnalyzedArticle, llm: LLMClient, date_str: str = "") -
         "必须覆盖的原文事实清单：\n"
         f"{json.dumps([fact.model_dump() for fact in article.source_facts], ensure_ascii=False)}"
     )
-    text = llm.complete(system_prompt, user_text).strip()
+    text = llm.complete(
+        system_prompt,
+        user_text,
+        stage="write-script",
+        prompt_version=PROMPT_VERSION,
+    ).strip()
     return PodcastScript(
-        text=fit_script_length(text, llm, facts=article.source_facts)
+        text=fit_script_length(
+            text,
+            llm,
+            facts=article.source_facts,
+            stage="write-script",
+        )
     )
 
 
@@ -82,6 +92,8 @@ def fit_script_length(
     text: str,
     llm: LLMClient,
     facts: list[SourceFact] | None = None,
+    *,
+    stage: str = "write-script",
 ) -> str:
     text = text.strip()
     for attempt in range(2):
@@ -95,6 +107,8 @@ def fit_script_length(
         text = llm.complete(
             _COMPRESSION_SYSTEM_PROMPT,
             _COMPRESSION_PROMPT.format(max_chars=SCRIPT_MAX_CHARS, script=text),
+            stage=stage,
+            prompt_version=PROMPT_VERSION,
         ).strip()
     for attempt in range(2):
         if not facts or len(text) >= SCRIPT_TARGET_MIN_CHARS:
@@ -112,6 +126,8 @@ def fit_script_length(
                 facts=_facts_text(facts),
                 script=text,
             ),
+            stage=stage,
+            prompt_version=PROMPT_VERSION,
         ).strip()
         if len(expanded) > SCRIPT_MAX_CHARS:
             logger.warning(

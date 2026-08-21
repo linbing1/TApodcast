@@ -131,6 +131,9 @@ class ContentReview(VersionedArtifact):
     scores: QualityScores
     issues: list[QualityIssue] = Field(default_factory=list)
     summary: str = ""
+    review_mode: Literal["static", "llm"] = "llm"
+    risk_level: Literal["low", "high"] = "high"
+    risk_reasons: list[str] = Field(default_factory=list)
     source_sha256: str = ""
     title_sha256: str = ""
     script_sha256: str = ""

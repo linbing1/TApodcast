@@ -97,6 +97,25 @@ async def test_run_configures_pipeline_runner(mock_build_runner):
 
 @pytest.mark.asyncio
 @patch("main._build_pipeline_runner")
+async def test_run_defaults_to_resume_for_existing_manifest(mock_build_runner, tmp_path):
+    output_dir = tmp_path / "article"
+    output_dir.mkdir()
+    (output_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    mock_build_runner.return_value.run = AsyncMock()
+
+    await run("https://example.com/article", output_dir=str(output_dir))
+
+    mock_build_runner.return_value.run.assert_awaited_once_with(
+        resume=True,
+        from_step=None,
+        to_step=None,
+        force_steps=None,
+        dry_run=False,
+    )
+
+
+@pytest.mark.asyncio
+@patch("main._build_pipeline_runner")
 async def test_run_skip_video_stops_after_audio(mock_build_runner):
     url = "https://www.nytimes.com/athletic/123/article-slug/"
     output_dir = f"output/{date.today()}/article-slug"
@@ -136,14 +155,16 @@ async def test_run_pipeline_step_uses_article_url_from_page(mock_build_runner, t
     assert context.article_url == "https://example.com/article"
     assert context.video_title == "自定义标题"
     mock_build_runner.return_value.run.assert_awaited_once_with(
+        resume=True,
         from_step="video",
         to_step="video",
+        force_steps=None,
     )
 
 
 @pytest.mark.asyncio
 @patch("main._build_pipeline_runner")
-async def test_generate_audio_command_runs_full_content_range(
+async def test_generate_audio_command_runs_audio_stage_only(
     mock_build_runner, tmp_path
 ):
     output_dir = tmp_path / "article"
@@ -159,8 +180,10 @@ async def test_generate_audio_command_runs_full_content_range(
 
     assert result == str(output_dir)
     mock_build_pipeline.run.assert_awaited_once_with(
-        from_step="analyze-content",
+        resume=True,
+        from_step="generate-audio",
         to_step="generate-audio",
+        force_steps=None,
     )
 
 
@@ -206,33 +229,18 @@ async def test_download_images_command_reads_manifest_and_writes_results(
 
 @pytest.mark.asyncio
 @patch("main.generate_audio_assets", new_callable=AsyncMock)
-@patch("main.finalize_content_command")
-@patch("main.review_content_command")
-@patch("main.write_script_draft")
-@patch("main.analyze_content")
-async def test_generate_audio_runs_content_quality_workflow(
-    mock_analyze,
-    mock_write,
-    mock_review,
-    mock_finalize,
-    mock_audio_assets,
-    tmp_path,
-):
+async def test_generate_audio_runs_audio_assets_only(mock_audio_assets, tmp_path):
     output_dir = tmp_path / "article"
 
     result = await generate_audio(str(output_dir))
 
     assert result == str(output_dir)
-    mock_analyze.assert_called_once_with(str(output_dir))
-    mock_write.assert_called_once_with(str(output_dir))
-    mock_review.assert_called_once_with(str(output_dir))
-    mock_finalize.assert_called_once_with(str(output_dir))
     mock_audio_assets.assert_awaited_once_with(str(output_dir))
 
 
 @pytest.mark.asyncio
 @patch("main.get_config")
-async def test_generate_audio_requires_article_text(mock_get_config, tmp_path):
+async def test_generate_audio_requires_final_script(mock_get_config, tmp_path):
     mock_get_config.return_value = {
         "llm_base_url": "https://llm.example.com/v1",
         "llm_api_key": "test-key",
@@ -242,12 +250,7 @@ async def test_generate_audio_requires_article_text(mock_get_config, tmp_path):
     }
     output_dir = tmp_path / "article"
     output_dir.mkdir()
-    (output_dir / "page.json").write_text(
-        json.dumps({"title": "Empty", "main_text": ""}),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="No article text"):
+    with pytest.raises(FileNotFoundError, match="Final podcast script"):
         await generate_audio(str(output_dir))
 
 
@@ -297,19 +300,10 @@ def test_run_cover_only_vertical_skips_landscape(mock_generate_cover, mock_gener
 
 
 @patch("main.generate_publish_copy")
-@patch("main.LLMClient")
-@patch("main.get_config")
 def test_run_publish_only_generates_publish_files(
-    mock_get_config,
-    mock_llm_class,
     mock_generate_publish_copy,
     tmp_path,
 ):
-    mock_get_config.return_value = {
-        "llm_base_url": "https://llm.example.com/v1",
-        "llm_api_key": "test-key",
-        "llm_model": "test-model",
-    }
     mock_generate_publish_copy.return_value = {
         "title": "统一的封面和发布标题",
     }
@@ -321,12 +315,4 @@ def test_run_publish_only_generates_publish_files(
 
     assert result == str(tmp_path / "publish.json")
     assert not frames_dir.exists()
-    mock_llm_class.assert_called_once_with(
-        "https://llm.example.com/v1",
-        "test-key",
-        "test-model",
-    )
-    mock_generate_publish_copy.assert_called_once_with(
-        str(tmp_path),
-        mock_llm_class.return_value,
-    )
+    mock_generate_publish_copy.assert_called_once_with(str(tmp_path))

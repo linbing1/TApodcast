@@ -144,10 +144,8 @@ def run_cover_only(
 
 
 def run_publish_only(output_dir: str) -> str:
-    config = get_config()
-    llm = LLMClient(config["llm_base_url"], config["llm_api_key"], config["llm_model"])
     logger.info("Generating Douyin publish copy from %s...", output_dir)
-    result = generate_publish_copy(output_dir, llm)
+    result = generate_publish_copy(output_dir)
     logger.info("Publish title: %s", result["title"])
     logger.info("Publish copy saved to %s", os.path.join(output_dir, "publish.json"))
     cleanup_frames(output_dir)
@@ -180,13 +178,15 @@ async def run(
     url: str,
     skip_video: bool = False,
     output_dir: str = "",
-    resume: bool = False,
+    resume: bool | None = None,
     from_step: str | None = None,
     to_step: str | None = None,
     force_steps: set[str] | None = None,
     dry_run: bool = False,
 ) -> str:
     output_dir = output_dir or _default_output_dir(url)
+    if resume is None:
+        resume = (Path(output_dir) / "manifest.json").exists()
     logger.info("Output directory: %s", output_dir)
 
     if skip_video:
@@ -199,6 +199,7 @@ async def run(
         output_dir=output_dir,
         configuration=_pipeline_configuration(),
         prompt_versions=_prompt_versions(),
+        llm_cache_enabled=not bool(force_steps),
     )
     runner = _build_pipeline_runner(context)
     await runner.run(
@@ -288,10 +289,6 @@ async def download_images_command(output_dir: str) -> str:
 
 
 async def generate_audio(output_dir: str) -> str:
-    analyze_content(output_dir)
-    write_script_draft(output_dir)
-    review_content_command(output_dir)
-    finalize_content_command(output_dir)
     await generate_audio_assets(output_dir)
     return output_dir
 
@@ -312,9 +309,17 @@ def _load_source_article(output_dir: str) -> ScrapedArticle:
     )
 
 
-def _create_llm_client() -> LLMClient:
+def _create_llm_client(output_dir: str, *, cache_enabled: bool = True) -> LLMClient:
     config = get_config()
-    return LLMClient(config["llm_base_url"], config["llm_api_key"], config["llm_model"])
+    output_path = Path(output_dir)
+    return LLMClient(
+        config["llm_base_url"],
+        config["llm_api_key"],
+        config["llm_model"],
+        cache_dir=output_path / ".llm-cache" if cache_enabled else None,
+        usage_path=output_path / "llm-usage.jsonl",
+        max_requests=config.get("llm_max_requests", 12),
+    )
 
 
 def _speech_date() -> str:
@@ -322,9 +327,9 @@ def _speech_date() -> str:
     return f"{today.year}年{today.month}月{today.day}日"
 
 
-def analyze_content(output_dir: str) -> str:
+def analyze_content(output_dir: str, *, cache_enabled: bool = True) -> str:
     article = _load_source_article(output_dir)
-    llm = _create_llm_client()
+    llm = _create_llm_client(output_dir, cache_enabled=cache_enabled)
 
     logger.info("Analyzing article and extracting traceable source facts...")
     analyzed = analyze_article(article, llm)
@@ -333,12 +338,12 @@ def analyze_content(output_dir: str) -> str:
     return output_dir
 
 
-def write_script_draft(output_dir: str) -> str:
+def write_script_draft(output_dir: str, *, cache_enabled: bool = True) -> str:
     analysis_path = os.path.join(output_dir, "analysis.json")
     if not os.path.exists(analysis_path):
         raise FileNotFoundError(f"Article analysis not found: {analysis_path}")
     analyzed = load_analyzed_article(analysis_path)
-    llm = _create_llm_client()
+    llm = _create_llm_client(output_dir, cache_enabled=cache_enabled)
 
     logger.info("Writing first podcast script draft...")
     script = write_script(analyzed, llm, date_str=_speech_date())
@@ -347,14 +352,14 @@ def write_script_draft(output_dir: str) -> str:
     return output_dir
 
 
-def review_content_command(output_dir: str) -> str:
+def review_content_command(output_dir: str, *, cache_enabled: bool = True) -> str:
     article = _load_source_article(output_dir)
     analyzed = load_analyzed_article(os.path.join(output_dir, "analysis.json"))
     draft_path = Path(output_dir) / "script-draft.txt"
     if not draft_path.exists():
         raise FileNotFoundError(f"Podcast script draft not found: {draft_path}")
     script = PodcastScript(text=draft_path.read_text(encoding="utf-8").strip())
-    llm = _create_llm_client()
+    llm = _create_llm_client(output_dir, cache_enabled=cache_enabled)
 
     logger.info("Reviewing draft against the original article and source facts...")
     review = review_content(article, analyzed, script, llm)
@@ -367,7 +372,7 @@ def review_content_command(output_dir: str) -> str:
     return output_dir
 
 
-def finalize_content_command(output_dir: str) -> str:
+def finalize_content_command(output_dir: str, *, cache_enabled: bool = True) -> str:
     article = _load_source_article(output_dir)
     analyzed = load_analyzed_article(os.path.join(output_dir, "analysis.json"))
     initial_review = load_content_review(
@@ -379,7 +384,7 @@ def finalize_content_command(output_dir: str) -> str:
     initial_script = PodcastScript(
         text=draft_path.read_text(encoding="utf-8").strip()
     )
-    llm = _create_llm_client()
+    llm = _create_llm_client(output_dir, cache_enabled=cache_enabled)
 
     logger.info("Finalizing content through the review and rewrite gate...")
     final_title_path = Path(output_dir) / "title.txt"
@@ -418,13 +423,17 @@ def finalize_content_command(output_dir: str) -> str:
     return output_dir
 
 
-async def generate_audio_assets(output_dir: str) -> str:
+async def generate_audio_assets(
+    output_dir: str,
+    *,
+    cache_enabled: bool = True,
+) -> str:
     config = get_config()
     script_path = Path(output_dir) / "script.txt"
     if not script_path.exists():
         raise FileNotFoundError(f"Final podcast script not found: {script_path}")
     script = PodcastScript(text=script_path.read_text(encoding="utf-8").strip())
-    llm = LLMClient(config["llm_base_url"], config["llm_api_key"], config["llm_model"])
+    llm = _create_llm_client(output_dir, cache_enabled=cache_enabled)
 
     logger.info("Translating and shortening image captions with LLM...")
     generate_image_captions(output_dir, llm)
@@ -456,23 +465,26 @@ async def _pipeline_download_images(context: PipelineContext) -> None:
 
 
 def _pipeline_analyze_content(context: PipelineContext) -> None:
-    analyze_content(context.output_dir)
+    analyze_content(context.output_dir, cache_enabled=context.llm_cache_enabled)
 
 
 def _pipeline_write_script(context: PipelineContext) -> None:
-    write_script_draft(context.output_dir)
+    write_script_draft(context.output_dir, cache_enabled=context.llm_cache_enabled)
 
 
 def _pipeline_review_content(context: PipelineContext) -> None:
-    review_content_command(context.output_dir)
+    review_content_command(context.output_dir, cache_enabled=context.llm_cache_enabled)
 
 
 def _pipeline_finalize_content(context: PipelineContext) -> None:
-    finalize_content_command(context.output_dir)
+    finalize_content_command(context.output_dir, cache_enabled=context.llm_cache_enabled)
 
 
 async def _pipeline_generate_audio(context: PipelineContext) -> None:
-    await generate_audio_assets(context.output_dir)
+    await generate_audio_assets(
+        context.output_dir,
+        cache_enabled=context.llm_cache_enabled,
+    )
 
 
 def _pipeline_video(context: PipelineContext) -> None:
@@ -627,8 +639,6 @@ def _build_pipeline_runner(context: PipelineContext) -> PipelineRunner:
                 "publish_title.txt",
                 "publish_description.txt",
             ),
-            configuration_keys=("llm_base_url", "llm_model"),
-            prompt_keys=("publish_copy",),
         ),
     ]
     return PipelineRunner(context, steps)
@@ -653,6 +663,8 @@ async def run_pipeline_step(
     cover_subtitle: str = "",
     cover_output_name: str = "cover.png",
     cover_orientation: str = "both",
+    resume: bool = True,
+    force: bool = False,
 ) -> str:
     if step_name not in PIPELINE_STEP_NAMES:
         raise ValueError(f"Unknown pipeline step: {step_name}")
@@ -673,23 +685,20 @@ async def run_pipeline_step(
         cover_orientation=cover_orientation,
         configuration=_pipeline_configuration(),
         prompt_versions=_prompt_versions(),
+        llm_cache_enabled=not force,
     )
     runner = _build_pipeline_runner(context)
-    await runner.run(from_step=step_name, to_step=step_name)
+    await runner.run(
+        resume=resume,
+        from_step=step_name,
+        to_step=step_name,
+        force_steps={step_name} if force else None,
+    )
     return output_dir
 
 
-async def run_content_audio_pipeline(output_dir: str) -> str:
-    resolved_url = _article_url_from_output(output_dir)
-    context = PipelineContext(
-        article_url=resolved_url,
-        output_dir=output_dir,
-        configuration=_pipeline_configuration(),
-        prompt_versions=_prompt_versions(),
-    )
-    runner = _build_pipeline_runner(context)
-    await runner.run(from_step="analyze-content", to_step="generate-audio")
-    return output_dir
+async def run_content_audio_pipeline(output_dir: str, *, force: bool = False) -> str:
+    return await run_pipeline_step("generate-audio", output_dir, force=force)
 
 
 def main() -> None:
@@ -706,11 +715,20 @@ def main() -> None:
         help="Output directory (defaults to output/date/article-slug)",
     )
     full.add_argument("--skip-video", action="store_true", help="Stop after TTS, skip video assembly")
-    full.add_argument(
+    resume_group = full.add_mutually_exclusive_group()
+    resume_group.add_argument(
         "--resume",
+        dest="resume",
         action="store_true",
         help="Skip completed steps whose inputs and outputs are unchanged",
     )
+    resume_group.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="Run selected steps even when an existing manifest could skip them",
+    )
+    full.set_defaults(resume=None)
     full.add_argument(
         "--from",
         dest="from_step",
@@ -740,6 +758,7 @@ def main() -> None:
     vid = sub.add_parser("video", help="Assemble video from existing output directory")
     vid.add_argument("--dir", required=True, help="Output directory containing images/, audio.mp3, audio.vtt")
     vid.add_argument("--title", default="", help="Override title (reads title.txt if omitted)")
+    vid.add_argument("--force", action="store_true", help="Regenerate this stage")
 
     cover = sub.add_parser("cover", help="Generate a Douyin cover from existing images")
     cover.add_argument("--dir", required=True, help="Output directory containing images/")
@@ -754,6 +773,7 @@ def main() -> None:
         default="both",
         help="Generate vertical cover.png, landscape cover-landscape.png, or both",
     )
+    cover.add_argument("--force", action="store_true", help="Regenerate this stage")
 
     publish = sub.add_parser(
         "publish-copy",
@@ -761,13 +781,16 @@ def main() -> None:
         help="Generate Douyin title, description, and hashtags",
     )
     publish.add_argument("--dir", required=True, help="Directory containing article outputs")
+    publish.add_argument("--force", action="store_true", help="Regenerate this stage")
 
     ext = sub.add_parser("extract", help="Extract article text, images, and videos")
     ext.add_argument("--url", required=True, help="The Athletic article URL")
     ext.add_argument("--dir", default="", help="Output directory (defaults to output/date/article-slug)")
+    ext.add_argument("--force", action="store_true", help="Regenerate this stage")
 
     dl = sub.add_parser("download-images", help="Download images from an extracted page manifest")
     dl.add_argument("--dir", required=True, help="Directory containing page.json")
+    dl.add_argument("--force", action="store_true", help="Regenerate this stage")
 
     content_commands = {
         "analyze-content": "Extract analysis and traceable facts from the article",
@@ -778,12 +801,14 @@ def main() -> None:
     for command, help_text in content_commands.items():
         content = sub.add_parser(command, help=help_text)
         content.add_argument("--dir", required=True, help="Article output directory")
+        content.add_argument("--force", action="store_true", help="Regenerate this stage")
 
     audio = sub.add_parser(
         "generate-audio",
-        help="Run the content quality workflow and generate podcast audio",
+        help="Generate image captions and podcast audio from existing content outputs",
     )
-    audio.add_argument("--dir", required=True, help="Directory containing page.json")
+    audio.add_argument("--dir", required=True, help="Directory containing images.json and script.txt")
+    audio.add_argument("--force", action="store_true", help="Regenerate this stage")
 
     clean = sub.add_parser(
         "cleanup",
@@ -823,6 +848,7 @@ def main() -> None:
                 "video",
                 args.dir,
                 video_title=args.title,
+                force=args.force,
             )
         )
     elif args.cmd == "cover":
@@ -836,10 +862,11 @@ def main() -> None:
                 cover_subtitle=args.subtitle,
                 cover_output_name=args.output,
                 cover_orientation=args.orientation,
+                force=args.force,
             )
         )
     elif args.cmd in ("publish-copy", "publish"):
-        asyncio.run(run_pipeline_step("publish-copy", args.dir))
+        asyncio.run(run_pipeline_step("publish-copy", args.dir, force=args.force))
     elif args.cmd == "cleanup":
         run_cleanup_only(args.dir)
     elif args.cmd == "doctor":
@@ -858,19 +885,20 @@ def main() -> None:
                 "extract",
                 args.dir,
                 article_url=args.url,
+                force=args.force,
             )
         )
     elif args.cmd == "download-images":
-        asyncio.run(run_pipeline_step("download-images", args.dir))
+        asyncio.run(run_pipeline_step("download-images", args.dir, force=args.force))
     elif args.cmd in {
         "analyze-content",
         "write-script",
         "review-content",
         "finalize-content",
     }:
-        asyncio.run(run_pipeline_step(args.cmd, args.dir))
+        asyncio.run(run_pipeline_step(args.cmd, args.dir, force=args.force))
     elif args.cmd == "generate-audio":
-        asyncio.run(run_content_audio_pipeline(args.dir))
+        asyncio.run(run_content_audio_pipeline(args.dir, force=args.force))
     else:
         if not args.url:
             parser.print_help()
@@ -880,7 +908,7 @@ def main() -> None:
                 args.url,
                 skip_video=args.skip_video,
                 output_dir=getattr(args, "dir", ""),
-                resume=getattr(args, "resume", False),
+                resume=getattr(args, "resume", None),
                 from_step=getattr(args, "from_step", None),
                 to_step=getattr(args, "to_step", None),
                 force_steps=set(getattr(args, "force_steps", [])),

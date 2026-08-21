@@ -8,7 +8,7 @@ class StubLLM:
         self.response = response
         self.calls = []
 
-    def complete(self, system, user, json_mode=False):
+    def complete(self, system, user, json_mode=False, **kwargs):
         self.calls.append((system, user, json_mode))
         return json.dumps(self.response, ensure_ascii=False)
 
@@ -66,6 +66,16 @@ def test_generate_publish_copy_reuses_cover_title_and_writes_outputs(tmp_path):
     request = json.loads(llm.calls[0][1])
     assert request["cover_title"] == cover_title
     assert llm.calls[0][2] is True
+
+
+def test_generate_publish_copy_defaults_to_local_generation(tmp_path):
+    _write_article_outputs(tmp_path)
+
+    result = generate_publish_copy(str(tmp_path))
+
+    assert result["title"] == "利物浦为何吸引超级富豪入股"
+    assert result["description"] == "利物浦正在评估少数股权投资。"
+    assert result["hashtags"][:2] == ["利物浦", "英超"]
 
 
 def test_generate_publish_copy_limits_title_and_total_description(tmp_path):
