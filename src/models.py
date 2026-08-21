@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 ARTIFACT_SCHEMA_VERSION = 1
@@ -156,6 +156,30 @@ class ContentQualityReport(VersionedArtifact):
     final_review: ContentReview
     passed: bool
     max_revisions: int = Field(ge=0)
+    revision_budget_used: int = Field(default=0, ge=0)
+    revision_budget_remaining: int = Field(default=0, ge=0)
+    revision_budget_exhausted: bool = False
+    source_sha256: str = ""
+    analysis_sha256: str = ""
+    initial_script_sha256: str = ""
+    review_prompt_version: str = ""
+    rewrite_prompt_version: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_revision_budget(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        revisions = data.get("revisions")
+        used = len(revisions) if isinstance(revisions, list) else 0
+        max_revisions = data.get("max_revisions", 0)
+        if not isinstance(max_revisions, int) or isinstance(max_revisions, bool):
+            max_revisions = 0
+        data["revision_budget_used"] = used
+        data["revision_budget_remaining"] = max(max_revisions - used, 0)
+        data["revision_budget_exhausted"] = used >= max_revisions
+        return data
 
 
 class ImageCaptionRecord(StrictModel):

@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
-PIPELINE_VERSION = "3"
+SCHEMA_VERSION = 3
+PIPELINE_VERSION = "4"
 MANIFEST_FILENAME = "manifest.json"
 
 
@@ -65,6 +65,28 @@ class StepRecord:
 
 
 @dataclass
+class LLMUsageSummary:
+    max_requests: int | None = None
+    api_requests: int = 0
+    cache_hits: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    remaining_requests: int | None = None
+    budget_exhausted: bool = False
+    stopped_before_stage: str | None = None
+    by_stage: dict[str, dict[str, int]] = field(default_factory=dict)
+    updated_at: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "LLMUsageSummary":
+        if not isinstance(data, dict):
+            return cls()
+        allowed = cls.__dataclass_fields__
+        return cls(**{key: value for key, value in data.items() if key in allowed})
+
+
+@dataclass
 class RunManifest:
     article_url: str
     output_dir: str
@@ -74,6 +96,7 @@ class RunManifest:
     pipeline_version: str = PIPELINE_VERSION
     configuration: dict[str, str] = field(default_factory=dict)
     prompt_versions: dict[str, str] = field(default_factory=dict)
+    llm_usage: LLMUsageSummary = field(default_factory=LLMUsageSummary)
     steps: dict[str, StepRecord] = field(default_factory=dict)
 
     @classmethod
@@ -99,6 +122,7 @@ class RunManifest:
             pipeline_version=str(data.get("pipeline_version", PIPELINE_VERSION)),
             configuration=dict(data.get("configuration", {})),
             prompt_versions=dict(data.get("prompt_versions", {})),
+            llm_usage=LLMUsageSummary.from_dict(data.get("llm_usage", {})),
             steps=steps,
         )
 
@@ -115,6 +139,10 @@ def _migrate_manifest(data: dict) -> dict:
         migrated.setdefault("prompt_versions", {})
         migrated["schema_version"] = 2
         version = 2
+    if version == 2:
+        migrated.setdefault("llm_usage", {})
+        migrated["schema_version"] = 3
+        version = 3
     if version != SCHEMA_VERSION:
         raise ValueError(
             f"Unsupported manifest schema version: {version}; expected {SCHEMA_VERSION}"
@@ -136,6 +164,13 @@ class ManifestStore:
         self.manifest.pipeline_version = PIPELINE_VERSION
         self.manifest.configuration.update(configuration or {})
         self.manifest.prompt_versions.update(prompt_versions or {})
+        configured_budget = self.manifest.configuration.get("llm_max_requests")
+        try:
+            max_requests = int(configured_budget) if configured_budget is not None else None
+        except (TypeError, ValueError):
+            max_requests = None
+        if max_requests is not None and max_requests > 0:
+            self._set_llm_budget(max_requests)
 
     def _load(self, article_url: str) -> RunManifest:
         if not self.path.exists():
@@ -168,6 +203,67 @@ class ManifestStore:
             encoding="utf-8",
         )
         os.replace(temporary_path, self.path)
+
+    def _set_llm_budget(self, max_requests: int) -> None:
+        summary = self.manifest.llm_usage
+        summary.max_requests = max_requests
+        summary.remaining_requests = max(max_requests - summary.api_requests, 0)
+        summary.budget_exhausted = summary.api_requests >= max_requests
+
+    def sync_llm_usage(
+        self,
+        usage_path: str | Path,
+        max_requests: int,
+    ) -> None:
+        path = Path(usage_path)
+        records: list[dict] = []
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict):
+                    records.append(record)
+
+        summary = LLMUsageSummary(max_requests=max_requests)
+        for record in records:
+            event = record.get("event")
+            stage = str(record.get("stage") or "unknown")
+            if event == "budget_exceeded":
+                summary.stopped_before_stage = stage
+                continue
+            if event not in {"api_request", "cache_hit"}:
+                continue
+
+            stage_usage = summary.by_stage.setdefault(
+                stage,
+                {
+                    "api_requests": 0,
+                    "cache_hits": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+            )
+            if event == "api_request":
+                summary.api_requests += 1
+                stage_usage["api_requests"] += 1
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    value = record.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        setattr(summary, key, getattr(summary, key) + value)
+                        stage_usage[key] += value
+            else:
+                summary.cache_hits += 1
+                stage_usage["cache_hits"] += 1
+
+        summary.remaining_requests = max(max_requests - summary.api_requests, 0)
+        summary.budget_exhausted = summary.api_requests >= max_requests
+        summary.updated_at = _utc_now()
+        self.manifest.llm_usage = summary
+        self.manifest.configuration["llm_max_requests"] = str(max_requests)
+        self._save()
 
     def get_step(self, name: str) -> StepRecord:
         return self.manifest.steps.setdefault(name, StepRecord())

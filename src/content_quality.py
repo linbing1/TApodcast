@@ -17,15 +17,10 @@ from src.models import (
     QualityScores,
     ScrapedArticle,
 )
-from src.script_writer import (
-    SCRIPT_MAX_CHARS,
-    SCRIPT_TARGET_MIN_CHARS,
-    fit_script_length,
-)
 
 
-REVIEW_PROMPT_VERSION = "content-reviewer-v3"
-REWRITE_PROMPT_VERSION = "content-rewriter-v3"
+REVIEW_PROMPT_VERSION = "content-reviewer-v4"
+REWRITE_PROMPT_VERSION = "content-rewriter-v4"
 MAX_REVISIONS = 1
 
 _SCORE_THRESHOLDS = {
@@ -70,6 +65,17 @@ _UNCERTAINTY_MARKERS = (
     "预计",
     "有意",
     "考虑",
+    "接近",
+    "报价",
+    "谈判",
+    "讨论",
+    "兴趣",
+    "寻求",
+    "探索",
+    "计划",
+    "有望",
+    "未最终确定",
+    "尚未达成",
     "传闻",
     "据报道",
     "据称",
@@ -83,47 +89,40 @@ _UNCERTAINTY_MARKERS = (
     "could",
     "may",
     "likely",
+    "interested",
+    "interest",
+    "in talks",
+    "negotiation",
+    "negotiations",
+    "bid",
+    "offer",
+    "set to",
 )
-_HIGH_RISK_PATTERNS = (
-    (
-        "转会或合同",
-        re.compile(r"转会|签约|续约|租借|\b(?:transfer\w*|contract\w*)\b", re.I),
-    ),
-    (
-        "金额或投资",
-        re.compile(
-            r"金额|身价|费用|投资|股权|收购|出售|\b(?:sale|investment|fee|million|billion)\b|[£€$]",
-            re.I,
-        ),
-    ),
-    (
-        "调查或法律争议",
-        re.compile(
-            r"调查|诉讼|法律|\b(?:investigation|lawsuit|legal|allegation)\b",
-            re.I,
-        ),
-    ),
-    (
-        "纪律或规则争议",
-        re.compile(
-            r"红牌|停赛|裁判|规则|处罚|禁赛|\b(?:red card|suspension|referee|rule)\b",
-            re.I,
-        ),
-    ),
-    (
-        "不确定性或传闻",
-        re.compile(
-            r"可能|传闻|据报道|据称|有意|考虑|\b(?:potential|reported|rumou?r|could|likely)\b",
-            re.I,
-        ),
-    ),
-    (
-        "重大伤病或事故",
-        re.compile(
-            r"伤病|受伤|死亡|事故|\b(?:injur\w*|accident|died|illness)\b",
-            re.I,
-        ),
-    ),
+_TRANSACTION_PATTERN = re.compile(
+    r"转会|签约|续约|租借|报价|谈判|合同|解约|出售|收购|投资|股权|所有权|"
+    r"年薪|工资|身价|费用|"
+    r"\b(?:transfer\w*|contract\w*|loan|bid|offer|negotiat\w*|sale|sell|sold|"
+    r"investment|stake|takeover|acquisition|salary|wage|fee)\b",
+    re.I,
+)
+_LEGAL_PATTERN = re.compile(
+    r"调查|诉讼|起诉|指控|法院|犯罪|欺诈|歧视|虐待|"
+    r"\b(?:investigation|lawsuit|legal action|allegation|charged|court|fraud|"
+    r"discrimination|abuse)\b",
+    re.I,
+)
+_DISCIPLINE_PATTERN = re.compile(
+    r"停赛|禁赛|纪律处分|处罚|上诉|红牌争议|腐败|操纵|违规|"
+    r"\b(?:suspension|banned?|disciplinary|appeal|overturn\w*|corrupt\w*|"
+    r"misconduct|sanction)\b",
+    re.I,
+)
+_SEVERE_HARM_PATTERN = re.compile(
+    r"死亡|去世|事故|住院|手术|赛季报销|长期缺阵|重伤|严重伤病|"
+    r"十字韧带|昏迷|"
+    r"\b(?:died|death|accident|hospitali[sz]\w*|surgery|season-ending|"
+    r"long-term injury|serious injury|acl)\b",
+    re.I,
 )
 
 _REVIEW_SYSTEM_PROMPT = """你是一位严谨的中文体育内容总编，负责检查短视频播报稿是否忠实、完整、清晰且适合口播。
@@ -172,7 +171,6 @@ _REWRITE_SYSTEM_PROMPT = """你是一位资深中文体育播报稿编辑。请�
 - 保留人物、俱乐部、金额、日期、数字、引语归属和不确定性措辞
 - 开头固定为“欢迎收听英超每日观察，今天是{date_str}，”
 - 结尾固定为“感谢收听，更多内容请关注英超每日观察。”
-- 全文控制在850-950个汉字，不超过950字
 - 使用自然口语和短句，避免重复
 - 标题不超过30个汉字，准确表达协议状态和不确定性，不得夸大
 - 只返回 JSON 对象：{{"title_cn": "修订后的标题", "script": "修订后的完整播报稿"}}
@@ -199,6 +197,16 @@ def _parse_json_object(response: str) -> dict:
 
 def _content_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _analysis_hash(analyzed: AnalyzedArticle) -> str:
+    payload = json.dumps(
+        analyzed.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _content_hash(payload)
 
 
 def _normalize_title(value: object, fallback: str) -> str:
@@ -274,25 +282,34 @@ def assess_article_risk(
     article: ScrapedArticle,
     analyzed: AnalyzedArticle,
 ) -> tuple[str, ...]:
-    material = " ".join(
-        (
-            article.title,
-            analyzed.article_type,
-            analyzed.overview,
-            analyzed.detail,
-            analyzed.key_people_and_data,
-            analyzed.impact,
-            article.full_text,
-        )
-    )
-    reasons = [label for label, pattern in _HIGH_RISK_PATTERNS if pattern.search(material)]
+    reasons: list[str] = []
+    title_material = f"{article.title} {analyzed.title_cn}"
+    if _TRANSACTION_PATTERN.search(title_material) and _has_uncertainty_marker(
+        title_material
+    ):
+        reasons.append("标题涉及未确认交易或合同")
+    if _LEGAL_PATTERN.search(title_material):
+        reasons.append("标题涉及法律或调查争议")
+    if _DISCIPLINE_PATTERN.search(title_material):
+        reasons.append("标题涉及纪律或处罚争议")
+    if _SEVERE_HARM_PATTERN.search(title_material):
+        reasons.append("标题涉及严重伤害或事故")
+
     for fact in analyzed.source_facts:
         if fact.importance != "critical":
             continue
-        if _numeric_markers(fact.claim):
-            reasons.append("critical事实包含数字或金额")
-        if _has_uncertainty_marker(fact.claim):
-            reasons.append("critical事实包含不确定性")
+        fact_material = f"{fact.category} {fact.claim}"
+        suffix = f"（{fact.fact_id}）"
+        if _TRANSACTION_PATTERN.search(fact_material) and _has_uncertainty_marker(
+            fact.claim
+        ):
+            reasons.append(f"critical事实涉及未确认交易或合同{suffix}")
+        if _LEGAL_PATTERN.search(fact_material):
+            reasons.append(f"critical事实涉及法律或调查争议{suffix}")
+        if _DISCIPLINE_PATTERN.search(fact_material):
+            reasons.append(f"critical事实涉及纪律或处罚争议{suffix}")
+        if _SEVERE_HARM_PATTERN.search(fact_material):
+            reasons.append(f"critical事实涉及严重伤害或事故{suffix}")
     return tuple(dict.fromkeys(reasons))
 
 
@@ -380,7 +397,7 @@ def _static_issues(
                         severity="warning",
                         description=f"{fact.fact_id} 这条 supporting 原文事实可能未被覆盖。",
                         evidence=fact.claim,
-                        suggestion="如字数允许，补充该背景事实。",
+                        suggestion="如内容需要，补充该背景事实。",
                         fact_ids=[fact.fact_id],
                     )
                 )
@@ -394,37 +411,6 @@ def _static_issues(
             )
         )
         return issues
-    if len(script) > SCRIPT_MAX_CHARS:
-        issues.append(
-            QualityIssue(
-                dimension="format",
-                severity="error",
-                description=(
-                    f"播报稿共 {len(script)} 字，超过 {SCRIPT_MAX_CHARS} 字上限。"
-                ),
-                suggestion="删除重复背景和次要细节，但保留 critical 事实。",
-            )
-        )
-    elif len(script) < 650:
-        issues.append(
-            QualityIssue(
-                dimension="completeness",
-                severity="error",
-                description=f"播报稿仅 {len(script)} 字，信息量明显不足。",
-                suggestion="补回遗漏的 critical 事实和关键论据。",
-            )
-        )
-    elif len(script) < SCRIPT_TARGET_MIN_CHARS:
-        issues.append(
-            QualityIssue(
-                dimension="completeness",
-                severity="warning",
-                description=(
-                    f"播报稿共 {len(script)} 字，低于 {SCRIPT_TARGET_MIN_CHARS} 字目标。"
-                ),
-                suggestion="确认核心事实和关键论据均已覆盖。",
-            )
-        )
     if not script.startswith(_REQUIRED_OPENING):
         issues.append(
             QualityIssue(
@@ -537,6 +523,21 @@ def _should_auto_rewrite(
     return False
 
 
+def _can_resume_quality_report(
+    report: ContentQualityReport,
+    article: ScrapedArticle,
+    analyzed: AnalyzedArticle,
+    initial_script: PodcastScript,
+) -> bool:
+    return (
+        report.source_sha256 == _content_hash(article.full_text)
+        and report.analysis_sha256 == _analysis_hash(analyzed)
+        and report.initial_script_sha256 == _content_hash(initial_script.text)
+        and report.review_prompt_version == REVIEW_PROMPT_VERSION
+        and report.rewrite_prompt_version == REWRITE_PROMPT_VERSION
+    )
+
+
 def review_content(
     article: ScrapedArticle,
     analyzed: AnalyzedArticle,
@@ -632,15 +633,7 @@ def rewrite_content(
     script_value = data.get("script") or data.get("script_text")
     if not isinstance(script_value, str) or not script_value.strip():
         raise ValueError(f"Content rewrite response is missing script: {response[:200]}")
-    script = PodcastScript(
-        text=fit_script_length(
-            script_value,
-            llm,
-            facts=analyzed.source_facts,
-            stage="finalize-content",
-        )
-    )
-    return title, script
+    return title, PodcastScript(text=script_value.strip())
 
 
 def finalize_content(
@@ -651,21 +644,46 @@ def finalize_content(
     llm: LLMClient,
     *,
     date_str: str,
-    max_revisions: int = MAX_REVISIONS,
+    max_revisions: int | None = None,
+    previous_report: ContentQualityReport | None = None,
 ) -> tuple[str, PodcastScript, ContentQualityReport]:
-    current_title = analyzed.title_cn
-    current_script = initial_script
-    current_review = initial_review
-    revisions: list[ContentRevision] = []
+    resume_previous = previous_report is not None and _can_resume_quality_report(
+        previous_report,
+        article,
+        analyzed,
+        initial_script,
+    )
+    if resume_previous:
+        current_title = previous_report.final_title
+        current_script = PodcastScript(text=previous_report.final_script)
+        current_review = previous_report.final_review
+        revisions = list(previous_report.revisions)
+        report_initial_title = previous_report.initial_title
+        report_initial_script = previous_report.initial_script
+        report_initial_review = previous_report.initial_review
+        revision_limit = (
+            previous_report.max_revisions
+            if max_revisions is None
+            else max(max_revisions, len(revisions))
+        )
+    else:
+        current_title = analyzed.title_cn
+        current_script = initial_script
+        current_review = initial_review
+        revisions = []
+        report_initial_title = analyzed.title_cn
+        report_initial_script = initial_script.text
+        report_initial_review = initial_review
+        revision_limit = MAX_REVISIONS if max_revisions is None else max_revisions
 
-    if current_review.passed and (
+    if not resume_previous and current_review.passed and (
         current_review.source_sha256 != _content_hash(article.full_text)
         or current_review.title_sha256 != _content_hash(current_title)
         or current_review.script_sha256 != _content_hash(current_script.text)
     ):
         current_review = review_content(article, analyzed, current_script, llm)
 
-    for attempt in range(1, max_revisions + 1):
+    for attempt in range(len(revisions) + 1, revision_limit + 1):
         if current_review.passed or not _should_auto_rewrite(current_review, analyzed):
             break
         current_analysis = analyzed.model_copy(update={"title_cn": current_title})
@@ -694,14 +712,19 @@ def finalize_content(
         )
 
     report = ContentQualityReport(
-        initial_title=analyzed.title_cn,
-        initial_script=initial_script.text,
-        initial_review=initial_review,
+        initial_title=report_initial_title,
+        initial_script=report_initial_script,
+        initial_review=report_initial_review,
         revisions=revisions,
         final_title=current_title,
         final_script=current_script.text,
         final_review=current_review,
         passed=current_review.passed,
-        max_revisions=max_revisions,
+        max_revisions=revision_limit,
+        source_sha256=_content_hash(article.full_text),
+        analysis_sha256=_analysis_hash(analyzed),
+        initial_script_sha256=_content_hash(initial_script.text),
+        review_prompt_version=REVIEW_PROMPT_VERSION,
+        rewrite_prompt_version=REWRITE_PROMPT_VERSION,
     )
     return current_title, current_script, report

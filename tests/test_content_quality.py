@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 from src.content_quality import finalize_content, review_content
 from src.models import (
     AnalyzedArticle,
+    ContentQualityReport,
     ContentReview,
     PodcastScript,
     QualityIssue,
@@ -269,6 +270,19 @@ def test_low_risk_article_uses_static_gate_without_llm():
     llm.complete.assert_not_called()
 
 
+def test_static_gate_does_not_reject_script_length():
+    llm = MagicMock()
+    short_script = PodcastScript(
+        text=f"{OPENING}阿森纳在主场取胜。{ENDING}"
+    )
+
+    result = review_content(_article(), _analyzed(), short_script, llm)
+
+    assert result.passed is True
+    assert result.review_mode == "static"
+    llm.complete.assert_not_called()
+
+
 def test_month_name_does_not_trigger_high_risk_review():
     llm = MagicMock()
     article = _article().model_copy(update={"full_text": "Arsenal won at home in May."})
@@ -277,6 +291,140 @@ def test_month_name_does_not_trigger_high_risk_review():
 
     assert result.review_mode == "static"
     llm.complete.assert_not_called()
+
+
+def test_background_risk_words_do_not_trigger_llm_review():
+    llm = MagicMock()
+    article = _article().model_copy(update={
+        "full_text": (
+            "Arsenal won at home. The report also mentioned an old transfer fee, "
+            "a referee decision and a previous injury in the background."
+        )
+    })
+
+    result = review_content(article, _analyzed(), _script(), llm)
+
+    assert result.review_mode == "static"
+    assert result.risk_level == "low"
+    llm.complete.assert_not_called()
+
+
+def test_confirmed_transfer_with_fee_uses_static_review():
+    llm = MagicMock()
+    article = ScrapedArticle(
+        title="Arsenal complete £50 million transfer",
+        link="https://example.com/article",
+        full_text="Arsenal completed the transfer for £50 million.",
+    )
+    analyzed = _analyzed().model_copy(update={
+        "title_cn": "阿森纳完成5000万英镑转会",
+        "article_type": "转会动态",
+        "source_facts": [
+            SourceFact(
+                fact_id="F001",
+                claim="阿森纳以5000万英镑完成转会。",
+                evidence="Arsenal completed the transfer for £50 million.",
+                category="转会",
+                importance="critical",
+            )
+        ],
+    })
+    script = PodcastScript(
+        text=f"{OPENING}阿森纳以5000万英镑完成转会。{ENDING}"
+    )
+
+    result = review_content(article, analyzed, script, llm)
+
+    assert result.review_mode == "static"
+    assert result.risk_level == "low"
+    llm.complete.assert_not_called()
+
+
+def test_supporting_uncertain_transfer_does_not_trigger_llm_review():
+    llm = MagicMock()
+    analyzed = _analyzed().model_copy(update={
+        "source_facts": [
+            *_analyzed().source_facts,
+            SourceFact(
+                fact_id="F002",
+                claim="阿森纳据报道可能在夏窗考虑另一笔转会。",
+                evidence="Arsenal could consider another summer transfer.",
+                category="转会",
+                importance="supporting",
+            ),
+        ]
+    })
+
+    result = review_content(_article(), analyzed, _script(), llm)
+
+    assert result.review_mode == "static"
+    assert result.risk_level == "low"
+    llm.complete.assert_not_called()
+
+
+def test_critical_uncertain_transfer_still_uses_llm_review():
+    llm = MagicMock()
+    llm.complete.return_value = _review_response()
+    article = ScrapedArticle(
+        title="Arsenal summer squad planning",
+        link="https://example.com/article",
+        full_text="Arsenal are reported to be considering a £50 million transfer.",
+    )
+    analyzed = _analyzed().model_copy(update={
+        "title_cn": "阿森纳规划夏窗阵容",
+        "article_type": "转会动态",
+        "source_facts": [
+            SourceFact(
+                fact_id="F001",
+                claim="据报道，阿森纳正考虑一笔5000万英镑的转会。",
+                evidence="Arsenal are reported to be considering a £50 million transfer.",
+                category="转会",
+                importance="critical",
+            )
+        ],
+    })
+    script = PodcastScript(
+        text=f"{OPENING}据报道，阿森纳正考虑一笔5000万英镑的转会。{ENDING}"
+    )
+
+    result = review_content(article, analyzed, script, llm)
+
+    assert result.review_mode == "llm"
+    assert result.risk_level == "high"
+    assert result.risk_reasons == ["critical事实涉及未确认交易或合同（F001）"]
+    llm.complete.assert_called_once()
+
+
+def test_critical_legal_dispute_still_uses_llm_review():
+    llm = MagicMock()
+    llm.complete.return_value = _review_response()
+    article = ScrapedArticle(
+        title="Club governance update",
+        link="https://example.com/article",
+        full_text="The club is facing a fraud investigation.",
+    )
+    analyzed = _analyzed().model_copy(update={
+        "title_cn": "俱乐部治理进展",
+        "article_type": "新闻报道",
+        "source_facts": [
+            SourceFact(
+                fact_id="F001",
+                claim="俱乐部正面临欺诈调查。",
+                evidence="The club is facing a fraud investigation.",
+                category="法律",
+                importance="critical",
+            )
+        ],
+    })
+    script = PodcastScript(
+        text=f"{OPENING}俱乐部正面临欺诈调查。{ENDING}"
+    )
+
+    result = review_content(article, analyzed, script, llm)
+
+    assert result.review_mode == "llm"
+    assert result.risk_reasons == ["critical事实涉及法律或调查争议（F001）"]
+    llm.complete.assert_called_once()
 
 
 def test_missing_fact_ids_do_not_trigger_an_automatic_rewrite():
@@ -328,3 +476,105 @@ def test_default_finalize_performs_at_most_one_revision():
     assert report.passed is False
     assert len(report.revisions) == 1
     assert llm.complete.call_count == 2
+
+
+def test_finalize_reuses_persisted_revision_budget():
+    llm = MagicMock()
+    failing_response = _review_response(
+        issues=[
+            {
+                "dimension": "factual_accuracy",
+                "severity": "error",
+                "description": "数字与原文不一致。",
+                "evidence": "错误数字",
+                "suggestion": "按原文修正。",
+                "fact_ids": ["F001"],
+            }
+        ]
+    )
+    llm.complete.side_effect = [
+        _rewrite_response(script=_script().text),
+        failing_response,
+    ]
+    initial_script = PodcastScript(text="不合格初稿")
+    initial_review = _failed_review()
+
+    _, _, first_report = finalize_content(
+        _high_risk_article(),
+        _analyzed(),
+        initial_script,
+        initial_review,
+        llm,
+        date_str="2026年8月18日",
+    )
+    persisted_report = ContentQualityReport.model_validate(
+        first_report.model_dump(mode="json")
+    )
+    second_llm = MagicMock()
+
+    final_title, final_script, second_report = finalize_content(
+        _high_risk_article(),
+        _analyzed(),
+        initial_script,
+        initial_review,
+        second_llm,
+        date_str="2026年8月18日",
+        previous_report=persisted_report,
+    )
+
+    assert second_report.passed is False
+    assert second_report.revision_budget_used == 1
+    assert second_report.revision_budget_remaining == 0
+    assert second_report.revision_budget_exhausted is True
+    assert len(second_report.revisions) == 1
+    assert final_title == first_report.final_title
+    assert final_script.text == first_report.final_script
+    second_llm.complete.assert_not_called()
+
+
+def test_finalize_resets_revision_budget_when_inputs_change():
+    first_llm = MagicMock()
+    first_llm.complete.side_effect = [
+        _rewrite_response(script=_script().text),
+        _review_response(
+            issues=[
+                {
+                    "dimension": "factual_accuracy",
+                    "severity": "error",
+                    "description": "数字与原文不一致。",
+                    "evidence": "错误数字",
+                    "suggestion": "按原文修正。",
+                    "fact_ids": ["F001"],
+                }
+            ]
+        ),
+    ]
+    _, _, previous_report = finalize_content(
+        _high_risk_article(),
+        _analyzed(),
+        PodcastScript(text="第一份不合格初稿"),
+        _failed_review(),
+        first_llm,
+        date_str="2026年8月18日",
+    )
+    second_llm = MagicMock()
+    second_llm.complete.side_effect = [
+        _rewrite_response(script=_script().text),
+        _review_response(),
+    ]
+
+    _, _, report = finalize_content(
+        _high_risk_article(),
+        _analyzed(),
+        PodcastScript(text="第二份已经修改的初稿"),
+        _failed_review(),
+        second_llm,
+        date_str="2026年8月18日",
+        previous_report=previous_report,
+    )
+
+    assert report.passed is True
+    assert report.revision_budget_used == 1
+    assert report.revision_budget_remaining == 0
+    assert len(report.revisions) == 1
+    assert second_llm.complete.call_count == 2

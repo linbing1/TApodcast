@@ -86,6 +86,7 @@ async def test_run_configures_pipeline_runner(mock_build_runner):
     context = mock_build_runner.call_args.args[0]
     assert context.article_url == url
     assert context.output_dir == output_dir
+    assert context.llm_cache_enabled is True
     mock_build_runner.return_value.run.assert_awaited_once_with(
         resume=True,
         from_step="download-images",
@@ -159,6 +160,31 @@ async def test_run_pipeline_step_uses_article_url_from_page(mock_build_runner, t
         from_step="video",
         to_step="video",
         force_steps=None,
+    )
+
+
+@pytest.mark.asyncio
+@patch("main._build_pipeline_runner")
+async def test_run_pipeline_step_force_keeps_llm_cache_enabled(
+    mock_build_runner, tmp_path
+):
+    output_dir = tmp_path / "article"
+    output_dir.mkdir()
+    (output_dir / "page.json").write_text(
+        json.dumps({"url": "https://example.com/article"}),
+        encoding="utf-8",
+    )
+    mock_build_runner.return_value.run = AsyncMock()
+
+    await run_pipeline_step("review-content", str(output_dir), force=True)
+
+    context = mock_build_runner.call_args.args[0]
+    assert context.llm_cache_enabled is True
+    mock_build_runner.return_value.run.assert_awaited_once_with(
+        resume=True,
+        from_step="review-content",
+        to_step="review-content",
+        force_steps={"review-content"},
     )
 
 

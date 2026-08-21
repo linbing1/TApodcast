@@ -323,7 +323,7 @@ PY
 文章来源：本次重新抓取 / 复用 YYYY-MM-DD 的历史 page.json / 同时复用历史图片资产
 质量门禁：通过或失败；总分、事实准确度、完整度、修订次数
 非阻断警告：逐条列出
-最终产物：标题、稿件字数、音视频时长、视频规格、封面规格、发布文案
+最终产物：标题、音视频时长、视频规格、封面规格、发布文案
 验证：manifest 阶段状态、测试结果（如果修改了代码）
 未完成项：没有则写“无”
 ```
@@ -342,7 +342,7 @@ PY
 | 步骤 | 输入 | 主要处理 | 产物 |
 |------|------|----------|------|
 | 第一步：内容解析 | The Athletic 文章 URL | 提取主要文字、图片、原始图注和视频清单，分离图注与署名，确定封面主图并下载图片 | `page.json`、`text.txt`、`images/`、`images.json`、`videos.json`、`cover.json` |
-| 第二步：内容质量 + TTS | `page.json`、`images.json` | 提取可追踪事实、生成初稿；低风险文章走本地静态门禁，高风险文章才调用 LLM 审校；仅事实错误或 critical 事实遗漏默认自动修订一轮；通过质量门禁后翻译图注并生成约三分钟配音 | `analysis.json`、`script-draft.txt`、`content-review.json`、`content-quality.json`、`title.txt`、`script.txt`、`image_captions.json`、`audio.mp3`、`audio.vtt` |
+| 第二步：内容质量 + TTS | `page.json`、`images.json` | 提取可追踪事实、生成初稿；低风险文章走本地静态门禁，高风险文章才调用 LLM 审校；仅事实错误或 critical 事实遗漏默认自动修订一轮；通过质量门禁后翻译图注并生成音频 | `analysis.json`、`script-draft.txt`、`content-review.json`、`content-quality.json`、`title.txt`、`script.txt`、`image_captions.json`、`audio.mp3`、`audio.vtt` |
 | 第三步：视频合成 | `images/`、`image_captions.json`、`audio.mp3`、`audio.vtt` | 按图片路径匹配中文图注，生成图片轮播并烧录黄色口播字幕 | `subtitles.ass`、`<中文标题>.mp4` |
 | 第四步：封面生成 | 封面主图和 `title.txt` | 生成带栏目标签、当前日期和中文标题的竖版与横版独立封面 | `cover.png`、`cover-landscape.png` |
 | 第五步：发布文案 | `page.json`、`analysis.json`、`script.txt`、`title.txt` | 整理不超过30字的抖音标题，并生成作品简介和相关话题 | `publish.json`、`publish_title.txt`、`publish_description.txt` |
@@ -480,6 +480,8 @@ OUT="output/YYYY-MM-DD/<article-slug>"
   --force generate-audio --force video
 ```
 
+`--force` 只强制流水线阶段重新执行，不会关闭 `.llm-cache/`。如果模型、提示词版本和输入均未变化，LLM 阶段仍会复用已成功的缓存响应，避免同一请求再次产生 API 费用。
+
 执行前查看计划而不修改文件：
 
 ```bash
@@ -488,7 +490,7 @@ OUT="output/YYYY-MM-DD/<article-slug>"
 
 当前可用阶段名为：`extract`、`download-images`、`analyze-content`、`write-script`、`review-content`、`finalize-content`、`generate-audio`、`video`、`cover`、`publish-copy`。单独执行这些分步骤命令时也会更新同一个 `manifest.json`。
 
-结构化 JSON 产物使用 Pydantic 数据契约并带有 `schema_version`。旧版数组格式的 `images.json`、`videos.json` 和 `image_captions.json` 仍可读取；`manifest.json` 会从 schema v1 自动迁移到 v2。所有 JSON 和关键文本产物均采用临时文件加原子替换的方式写入。
+结构化 JSON 产物使用 Pydantic 数据契约并带有 `schema_version`。旧版数组格式的 `images.json`、`videos.json` 和 `image_captions.json` 仍可读取；`manifest.json` 会从 schema v1/v2 自动迁移到 v3。所有 JSON 和关键文本产物均采用临时文件加原子替换的方式写入。
 
 ## 分步骤执行
 
@@ -561,15 +563,47 @@ audio.vtt              # TTS 时间字幕
 .venv/bin/python main.py finalize-content --dir "$OUT"
 ```
 
-`analysis.json` 中的 `source_facts` 为每条事实分配 `F001` 形式的编号，并保存中文事实、原文依据、类别和重要级别。流程会先用本地规则判断文章风险：转会、合同、金额、法律争议、纪律争议、传闻、不确定性、重大伤病或事故等文章标记为高风险；没有这些信号的文章标记为低风险。低风险文章由本地事实覆盖、数字/金额、不确定性措辞、格式和长度规则完成审校，不调用 LLM；高风险文章才调用 LLM，逐项检查所有 `critical` 事实，以及人物、俱乐部、数字、金额、日期、引语归属、因果关系和不确定性措辞。
+`analysis.json` 中的 `source_facts` 为每条事实分配 `F001` 形式的编号，并保存中文事实、原文依据、类别和重要级别。流程会先用本地规则判断文章风险，但只检查原文/中文标题和 `importance=critical` 的核心事实，不再扫描整篇原文中的所有背景词。只有未确认的转会、合同、投资或所有权交易，以及涉及法律调查、纪律处罚、严重伤害或事故的核心内容才标记为高风险。已经确认的转会和金额、普通伤病、战术预测，以及仅出现在 supporting 事实或原文背景中的敏感词都走低风险静态门禁。低风险文章由本地事实覆盖、数字/金额、不确定性措辞和格式规则完成审校，不调用 LLM；高风险文章才调用 LLM，逐项检查所有 `critical` 事实，以及人物、俱乐部、数字、金额、日期、引语归属、因果关系和不确定性措辞。
 
-`content-review.json` 会记录 `review_mode`（`static` 或 `llm`）、`risk_level`（`low` 或 `high`）和 `risk_reasons`，便于确认某篇文章是否实际消耗了审校调用。审校和重写请求只发送文章标题、URL、`source_facts`、精简分析摘要、标题、当前播报稿和审校报告，不重复发送完整原文；完整原文仍保存在本地 `page.json`/`text.txt`，供流程追溯。
+`content-review.json` 会记录 `review_mode`（`static` 或 `llm`）、`risk_level`（`low` 或 `high`）和 `risk_reasons`，便于确认某篇文章是否实际消耗了审校调用。由 critical 事实触发的原因会包含对应的 `F001` 形式编号，方便直接定位误判来源。审校和重写请求只发送文章标题、URL、`source_facts`、精简分析摘要、标题、当前播报稿和审校报告，不重复发送完整原文；完整原文仍保存在本地 `page.json`/`text.txt`，供流程追溯。
 
-质量门禁要求事实准确度至少 90、完整度至少 85、结构/口语性/标题质量至少 80、总分至少 85，且不能存在 `error` 或 `blocker`。未通过时默认最多自动修订一轮，且只有事实准确度错误/阻断问题，或明确关联 `critical` 事实的完整度错误/阻断问题，才会触发 LLM 重写；纯格式、风格、标题吸引力或缺少事实清单的问题不会盲目重写，会保留报告供人工处理或重新运行上游分析。修订后仍未通过则停止后续 TTS 和视频生成，保留 `content-quality.json`、`title-candidate.txt` 和 `script-candidate.txt` 供人工检查。最终 `title.txt` 和 `script.txt` 只在质量门禁通过后生成。
+质量门禁要求事实准确度至少 90、完整度至少 85、结构/口语性/标题质量至少 80、总分至少 85，且不能存在 `error` 或 `blocker`。未通过时默认最多自动修订一轮，且只有事实准确度错误/阻断问题，或明确关联 `critical` 事实的完整度错误/阻断问题，才会触发 LLM 重写；纯格式、风格、标题吸引力或缺少事实清单的问题不会盲目重写，会保留报告供人工处理或重新运行上游分析。修订预算会持久化到 `content-quality.json`，同一原文、分析、初稿和提示词版本重复执行 `finalize-content --force` 时会继承已用次数，不会再次获得一轮修订；只有这些输入或提示词版本变化时才会开始新的预算。修订后仍未通过则停止后续 TTS 和视频生成，保留 `content-quality.json`、`title-candidate.txt` 和 `script-candidate.txt` 供人工检查。最终 `title.txt` 和 `script.txt` 只在质量门禁通过后生成。
 
-每篇文章的 LLM 请求会记录到 `llm-usage.jsonl`，成功响应会缓存到 `.llm-cache/`。缓存 Key 包含模型、阶段、提示词版本和完整输入；缓存命中不会访问 API，也不计入 `LLM_MAX_REQUESTS_PER_ARTICLE`。达到预算后流程会停止并保留当前失败阶段，避免无限重试。
+`content-quality.json` 中的 `max_revisions`、`revision_budget_used`、`revision_budget_remaining` 和 `revision_budget_exhausted` 会直接显示当前文章的累计质量修订预算状态。
 
-播报稿以 850–950 个汉字、约 3 分钟口播为目标，超长时会自动压缩；规定的节目开头、结尾、长度和 Markdown 污染同时由确定性规则检查，不完全依赖 LLM 自评。
+每篇文章的 LLM 请求会记录到 `llm-usage.jsonl`，成功响应会缓存到 `.llm-cache/`。缓存 Key 包含模型、阶段、提示词版本和完整输入；缓存命中不会访问 API，也不计入 `LLM_MAX_REQUESTS_PER_ARTICLE`。`manifest.json.configuration.llm_max_requests` 保存本次运行采用的预算，`manifest.json.llm_usage` 会在每次 API 请求、缓存命中或预算拦截后实时汇总：
+
+```json
+{
+  "configuration": {
+    "llm_max_requests": "12"
+  },
+  "llm_usage": {
+    "max_requests": 12,
+    "api_requests": 5,
+    "cache_hits": 2,
+    "prompt_tokens": 12345,
+    "completion_tokens": 2345,
+    "total_tokens": 14690,
+    "remaining_requests": 7,
+    "budget_exhausted": false,
+    "stopped_before_stage": null,
+    "by_stage": {
+      "analyze-content": {
+        "api_requests": 1,
+        "cache_hits": 0,
+        "prompt_tokens": 3000,
+        "completion_tokens": 800,
+        "total_tokens": 3800
+      }
+    }
+  }
+}
+```
+
+预算按**未命中缓存的逻辑请求**计算。完成第 N 次实际请求后，`remaining_requests` 变为 `0`，`budget_exhausted` 变为 `true`；当后续阶段准备发起第 N+1 次未缓存请求时，流程会在访问 API 之前停止，该阶段在 `manifest.json.steps` 中标记为 `failed`，阶段名写入 `llm_usage.stopped_before_stage`。预算耗尽后，已经存在的缓存仍可命中，因为缓存读取发生在预算检查之前。
+
+播报稿不设置固定字数或时长目标，生成后不会再调用 LLM 进行压缩或扩充，也不会因为长度问题阻断质量门禁；仍会由确定性规则检查固定节目开头、结尾、空稿和 Markdown 污染。
 
 图片图注规则：
 
@@ -738,7 +772,7 @@ output/
 └── 2026-08-11/
     └── liverpool-transfer-summer-window-analysis/
         ├── images/          # 从文章下载的图片
-        ├── manifest.json    # 流程阶段状态、耗时和输入输出哈希
+        ├── manifest.json    # 阶段状态、运行配置、LLM 预算和实时汇总
         ├── llm-usage.jsonl  # 每次 LLM 请求、缓存命中、Token 和预算记录
         ├── .llm-cache/      # 当前文章的成功 LLM 响应缓存
         ├── page.json        # 正文、图片原始图注、视频及封面候选
@@ -748,7 +782,7 @@ output/
         ├── analysis.json    # 正文分析和带原文依据的事实清单
         ├── script-draft.txt # 第一版口播稿
         ├── content-review.json # 第一轮内容审校和评分
-        ├── content-quality.json # 修订历史及最终质量门禁结果
+        ├── content-quality.json # 累计修订预算、修订历史及最终质量门禁结果
         ├── image_captions.json # 原始英文图注与精简中文图注映射
         ├── title.txt        # 中文短标题
         ├── script.txt       # 通过质量门禁的最终中文口播稿

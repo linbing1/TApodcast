@@ -4,6 +4,7 @@ import glob
 import logging
 import os
 import re
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlparse
@@ -12,11 +13,12 @@ from src.analyzer import PROMPT_VERSION as ANALYZER_PROMPT_VERSION
 from src.analyzer import analyze_article
 from src.artifacts import (
     load_analyzed_article,
+    load_content_quality_report,
     load_content_review,
     load_page_content,
     write_artifact,
 )
-from src.config import get_config
+from src.config import get_config, get_llm_max_requests
 from src.content_quality import (
     REVIEW_PROMPT_VERSION,
     REWRITE_PROMPT_VERSION,
@@ -199,7 +201,6 @@ async def run(
         output_dir=output_dir,
         configuration=_pipeline_configuration(),
         prompt_versions=_prompt_versions(),
-        llm_cache_enabled=not bool(force_steps),
     )
     runner = _build_pipeline_runner(context)
     await runner.run(
@@ -309,7 +310,12 @@ def _load_source_article(output_dir: str) -> ScrapedArticle:
     )
 
 
-def _create_llm_client(output_dir: str, *, cache_enabled: bool = True) -> LLMClient:
+def _create_llm_client(
+    output_dir: str,
+    *,
+    cache_enabled: bool = True,
+    usage_callback: Callable[[], None] | None = None,
+) -> LLMClient:
     config = get_config()
     output_path = Path(output_dir)
     return LLMClient(
@@ -319,6 +325,7 @@ def _create_llm_client(output_dir: str, *, cache_enabled: bool = True) -> LLMCli
         cache_dir=output_path / ".llm-cache" if cache_enabled else None,
         usage_path=output_path / "llm-usage.jsonl",
         max_requests=config.get("llm_max_requests", 12),
+        usage_callback=usage_callback,
     )
 
 
@@ -327,9 +334,18 @@ def _speech_date() -> str:
     return f"{today.year}年{today.month}月{today.day}日"
 
 
-def analyze_content(output_dir: str, *, cache_enabled: bool = True) -> str:
+def analyze_content(
+    output_dir: str,
+    *,
+    cache_enabled: bool = True,
+    usage_callback: Callable[[], None] | None = None,
+) -> str:
     article = _load_source_article(output_dir)
-    llm = _create_llm_client(output_dir, cache_enabled=cache_enabled)
+    llm = _create_llm_client(
+        output_dir,
+        cache_enabled=cache_enabled,
+        usage_callback=usage_callback,
+    )
 
     logger.info("Analyzing article and extracting traceable source facts...")
     analyzed = analyze_article(article, llm)
@@ -338,12 +354,21 @@ def analyze_content(output_dir: str, *, cache_enabled: bool = True) -> str:
     return output_dir
 
 
-def write_script_draft(output_dir: str, *, cache_enabled: bool = True) -> str:
+def write_script_draft(
+    output_dir: str,
+    *,
+    cache_enabled: bool = True,
+    usage_callback: Callable[[], None] | None = None,
+) -> str:
     analysis_path = os.path.join(output_dir, "analysis.json")
     if not os.path.exists(analysis_path):
         raise FileNotFoundError(f"Article analysis not found: {analysis_path}")
     analyzed = load_analyzed_article(analysis_path)
-    llm = _create_llm_client(output_dir, cache_enabled=cache_enabled)
+    llm = _create_llm_client(
+        output_dir,
+        cache_enabled=cache_enabled,
+        usage_callback=usage_callback,
+    )
 
     logger.info("Writing first podcast script draft...")
     script = write_script(analyzed, llm, date_str=_speech_date())
@@ -352,14 +377,23 @@ def write_script_draft(output_dir: str, *, cache_enabled: bool = True) -> str:
     return output_dir
 
 
-def review_content_command(output_dir: str, *, cache_enabled: bool = True) -> str:
+def review_content_command(
+    output_dir: str,
+    *,
+    cache_enabled: bool = True,
+    usage_callback: Callable[[], None] | None = None,
+) -> str:
     article = _load_source_article(output_dir)
     analyzed = load_analyzed_article(os.path.join(output_dir, "analysis.json"))
     draft_path = Path(output_dir) / "script-draft.txt"
     if not draft_path.exists():
         raise FileNotFoundError(f"Podcast script draft not found: {draft_path}")
     script = PodcastScript(text=draft_path.read_text(encoding="utf-8").strip())
-    llm = _create_llm_client(output_dir, cache_enabled=cache_enabled)
+    llm = _create_llm_client(
+        output_dir,
+        cache_enabled=cache_enabled,
+        usage_callback=usage_callback,
+    )
 
     logger.info("Reviewing draft against the original article and source facts...")
     review = review_content(article, analyzed, script, llm)
@@ -372,7 +406,12 @@ def review_content_command(output_dir: str, *, cache_enabled: bool = True) -> st
     return output_dir
 
 
-def finalize_content_command(output_dir: str, *, cache_enabled: bool = True) -> str:
+def finalize_content_command(
+    output_dir: str,
+    *,
+    cache_enabled: bool = True,
+    usage_callback: Callable[[], None] | None = None,
+) -> str:
     article = _load_source_article(output_dir)
     analyzed = load_analyzed_article(os.path.join(output_dir, "analysis.json"))
     initial_review = load_content_review(
@@ -384,7 +423,15 @@ def finalize_content_command(output_dir: str, *, cache_enabled: bool = True) -> 
     initial_script = PodcastScript(
         text=draft_path.read_text(encoding="utf-8").strip()
     )
-    llm = _create_llm_client(output_dir, cache_enabled=cache_enabled)
+    quality_path = Path(output_dir) / "content-quality.json"
+    previous_report = None
+    if quality_path.exists():
+        previous_report = load_content_quality_report(quality_path)
+    llm = _create_llm_client(
+        output_dir,
+        cache_enabled=cache_enabled,
+        usage_callback=usage_callback,
+    )
 
     logger.info("Finalizing content through the review and rewrite gate...")
     final_title_path = Path(output_dir) / "title.txt"
@@ -398,16 +445,23 @@ def finalize_content_command(output_dir: str, *, cache_enabled: bool = True) -> 
         initial_review,
         llm,
         date_str=_speech_date(),
+        previous_report=previous_report,
     )
-    write_artifact(os.path.join(output_dir, "content-quality.json"), report)
+    write_artifact(quality_path, report)
     if not report.passed:
         title_candidate_path = Path(output_dir) / "title-candidate.txt"
         candidate_path = Path(output_dir) / "script-candidate.txt"
         atomic_write_text(title_candidate_path, final_title)
         atomic_write_text(candidate_path, final_script.text)
+        budget_status = (
+            "revision budget exhausted"
+            if report.revision_budget_exhausted
+            else "no eligible automatic rewrite"
+        )
         raise ValueError(
-            "Content quality gate failed after "
-            f"{len(report.revisions)} revision(s): "
+            "Content quality gate failed; "
+            f"{budget_status} ({report.revision_budget_used}/"
+            f"{report.max_revisions} revision(s)): "
             f"{report.final_review.summary or 'review the content-quality.json report'}"
         )
 
@@ -427,13 +481,18 @@ async def generate_audio_assets(
     output_dir: str,
     *,
     cache_enabled: bool = True,
+    usage_callback: Callable[[], None] | None = None,
 ) -> str:
     config = get_config()
     script_path = Path(output_dir) / "script.txt"
     if not script_path.exists():
         raise FileNotFoundError(f"Final podcast script not found: {script_path}")
     script = PodcastScript(text=script_path.read_text(encoding="utf-8").strip())
-    llm = _create_llm_client(output_dir, cache_enabled=cache_enabled)
+    llm = _create_llm_client(
+        output_dir,
+        cache_enabled=cache_enabled,
+        usage_callback=usage_callback,
+    )
 
     logger.info("Translating and shortening image captions with LLM...")
     generate_image_captions(output_dir, llm)
@@ -465,25 +524,42 @@ async def _pipeline_download_images(context: PipelineContext) -> None:
 
 
 def _pipeline_analyze_content(context: PipelineContext) -> None:
-    analyze_content(context.output_dir, cache_enabled=context.llm_cache_enabled)
+    analyze_content(
+        context.output_dir,
+        cache_enabled=context.llm_cache_enabled,
+        usage_callback=context.llm_usage_callback,
+    )
 
 
 def _pipeline_write_script(context: PipelineContext) -> None:
-    write_script_draft(context.output_dir, cache_enabled=context.llm_cache_enabled)
+    write_script_draft(
+        context.output_dir,
+        cache_enabled=context.llm_cache_enabled,
+        usage_callback=context.llm_usage_callback,
+    )
 
 
 def _pipeline_review_content(context: PipelineContext) -> None:
-    review_content_command(context.output_dir, cache_enabled=context.llm_cache_enabled)
+    review_content_command(
+        context.output_dir,
+        cache_enabled=context.llm_cache_enabled,
+        usage_callback=context.llm_usage_callback,
+    )
 
 
 def _pipeline_finalize_content(context: PipelineContext) -> None:
-    finalize_content_command(context.output_dir, cache_enabled=context.llm_cache_enabled)
+    finalize_content_command(
+        context.output_dir,
+        cache_enabled=context.llm_cache_enabled,
+        usage_callback=context.llm_usage_callback,
+    )
 
 
 async def _pipeline_generate_audio(context: PipelineContext) -> None:
     await generate_audio_assets(
         context.output_dir,
         cache_enabled=context.llm_cache_enabled,
+        usage_callback=context.llm_usage_callback,
     )
 
 
@@ -528,6 +604,7 @@ def _pipeline_configuration() -> dict[str, str]:
     return {
         "llm_base_url": os.environ.get("LLM_BASE_URL", "https://api.deepseek.com/v1"),
         "llm_model": os.environ.get("LLM_MODEL", "deepseek-v4-flash"),
+        "llm_max_requests": str(get_llm_max_requests()),
         "tts_voice": os.environ.get("TTS_VOICE", "zh-CN-YunjianNeural"),
         "tts_rate": os.environ.get("TTS_RATE", "+10%"),
     }
@@ -685,7 +762,6 @@ async def run_pipeline_step(
         cover_orientation=cover_orientation,
         configuration=_pipeline_configuration(),
         prompt_versions=_prompt_versions(),
-        llm_cache_enabled=not force,
     )
     runner = _build_pipeline_runner(context)
     await runner.run(

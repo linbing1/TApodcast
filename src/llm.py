@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,7 @@ class LLMClient:
     cache_dir: str | Path | None = None
     usage_path: str | Path | None = None
     max_requests: int | None = None
+    usage_callback: Callable[[], None] | None = None
 
     def __post_init__(self) -> None:
         if not self.api_key:
@@ -260,10 +262,22 @@ class LLMClient:
             record.get("event") == "api_request" for record in self._usage_records()
         )
         if request_count >= self.max_requests:
-            raise LLMBudgetExceededError(
+            message = (
                 f"LLM request budget exceeded before stage {stage or 'unknown'}: "
                 f"{request_count}/{self.max_requests} requests"
             )
+            self._record_usage(
+                event="budget_exceeded",
+                stage=stage,
+                prompt_version="",
+                cache_key="",
+                attempts=0,
+                prompt_tokens=None,
+                completion_tokens=None,
+                total_tokens=None,
+                error=message,
+            )
+            raise LLMBudgetExceededError(message)
 
     def _record_usage(
         self,
@@ -297,6 +311,11 @@ class LLMClient:
         self.usage_path.parent.mkdir(parents=True, exist_ok=True)
         with self.usage_path.open("a", encoding="utf-8") as target:
             target.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if self.usage_callback is not None:
+            try:
+                self.usage_callback()
+            except Exception as error:
+                logger.warning("Unable to update manifest LLM usage summary: %s", error)
 
     @staticmethod
     def _token_value(usage: dict[str, Any], key: str) -> int | None:

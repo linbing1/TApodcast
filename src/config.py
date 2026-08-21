@@ -13,6 +13,10 @@ def _positive_int(name: str, default: int) -> int:
     return value
 
 
+def get_llm_max_requests() -> int:
+    return _positive_int("LLM_MAX_REQUESTS_PER_ARTICLE", 12)
+
+
 def get_config() -> dict:
     cookie_raw = os.environ.get("ATHLETIC_COOKIES", "").strip()
     if not cookie_raw:
@@ -36,7 +40,7 @@ def get_config() -> dict:
         "llm_base_url": os.environ.get("LLM_BASE_URL", "https://api.deepseek.com/v1"),
         "llm_api_key": os.environ.get("LLM_API_KEY", ""),
         "llm_model": os.environ.get("LLM_MODEL", "deepseek-v4-flash"),
-        "llm_max_requests": _positive_int("LLM_MAX_REQUESTS_PER_ARTICLE", 12),
+        "llm_max_requests": get_llm_max_requests(),
         "tts_voice": os.environ.get("TTS_VOICE", "zh-CN-YunjianNeural"),
         "tts_rate": os.environ.get("TTS_RATE", "+10%"),
     }

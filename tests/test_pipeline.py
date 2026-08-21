@@ -148,6 +148,46 @@ async def test_pipeline_records_failed_step(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pipeline_updates_manifest_llm_usage_through_shared_callback(tmp_path):
+    output_dir = tmp_path / "article"
+
+    async def analyze(context):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        usage_path = output_dir / "llm-usage.jsonl"
+        usage_path.write_text(
+            json.dumps({
+                "event": "api_request",
+                "stage": "analyze-content",
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            }) + "\n",
+            encoding="utf-8",
+        )
+        assert context.llm_usage_callback is not None
+        context.llm_usage_callback()
+        (output_dir / "analysis.json").write_text("analysis", encoding="utf-8")
+
+    context = PipelineContext(
+        "https://example.com/article",
+        str(output_dir),
+        configuration={"llm_max_requests": "2"},
+    )
+    runner = PipelineRunner(
+        context,
+        [PipelineStep("analyze-content", analyze, _paths(), _paths("analysis.json"))],
+    )
+
+    await runner.run()
+
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["llm_usage"]["max_requests"] == 2
+    assert manifest["llm_usage"]["api_requests"] == 1
+    assert manifest["llm_usage"]["remaining_requests"] == 1
+    assert manifest["llm_usage"]["by_stage"]["analyze-content"]["total_tokens"] == 15
+
+
+@pytest.mark.asyncio
 async def test_pipeline_dry_run_plans_without_writing_files(tmp_path):
     output_dir = tmp_path / "article"
     called = False

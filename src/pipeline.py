@@ -3,7 +3,7 @@ import inspect
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from src.manifest import ManifestStore, fingerprint_paths
@@ -26,6 +26,11 @@ class PipelineContext:
     configuration: dict[str, str] = field(default_factory=dict)
     prompt_versions: dict[str, str] = field(default_factory=dict)
     llm_cache_enabled: bool = True
+    llm_usage_callback: Callable[[], None] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
 
 PathResolver = Callable[[PipelineContext], list[str]]
@@ -56,7 +61,6 @@ class PipelineRunner:
         names = [step.name for step in steps]
         if len(names) != len(set(names)):
             raise ValueError("Pipeline step names must be unique")
-        self.context = context
         self.steps = steps
         self.store = ManifestStore(
             context.output_dir,
@@ -64,6 +68,17 @@ class PipelineRunner:
             configuration=context.configuration,
             prompt_versions=context.prompt_versions,
         )
+        configured_budget = context.configuration.get("llm_max_requests")
+        try:
+            max_requests = int(configured_budget) if configured_budget is not None else None
+        except (TypeError, ValueError):
+            max_requests = None
+        if max_requests is not None and max_requests > 0:
+            usage_path = Path(context.output_dir) / "llm-usage.jsonl"
+            callback = lambda: self.store.sync_llm_usage(usage_path, max_requests)
+            self.context = replace(context, llm_usage_callback=callback)
+        else:
+            self.context = context
 
     @property
     def step_names(self) -> list[str]:
