@@ -523,6 +523,83 @@ def _should_auto_rewrite(
     return False
 
 
+def _static_rewrite_issues(
+    review: ContentReview,
+    article: ScrapedArticle,
+    analyzed: AnalyzedArticle,
+    script: PodcastScript,
+) -> list[QualityIssue] | None:
+    if any(
+        getattr(review.scores, dimension) < threshold
+        for dimension, threshold in _SCORE_THRESHOLDS.items()
+    ):
+        return None
+    static_issues = _static_issues(article, analyzed, script.text)
+    numeric_issues = [
+        issue
+        for issue in static_issues
+        if (
+            issue.dimension == "factual_accuracy"
+            and "数字、金额或比例" in issue.description
+        )
+    ]
+    numeric_issue_keys = {
+        json.dumps(issue.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+        for issue in numeric_issues
+    }
+    blocking_issues = [
+        issue for issue in review.issues if issue.severity in {"error", "blocker"}
+    ]
+    if not blocking_issues or not numeric_issues:
+        return None
+    if any(
+        json.dumps(issue.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+        not in numeric_issue_keys
+        for issue in blocking_issues
+    ):
+        return None
+    return numeric_issues
+
+
+def _build_static_followup_review(
+    previous_review: ContentReview,
+    previous_static_issues: list[QualityIssue],
+    article: ScrapedArticle,
+    analyzed: AnalyzedArticle,
+    script: PodcastScript,
+) -> ContentReview:
+    previous_static_issue_keys = {
+        json.dumps(issue.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+        for issue in previous_static_issues
+    }
+    preserved_issues = [
+        issue
+        for issue in previous_review.issues
+        if json.dumps(issue.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+        not in previous_static_issue_keys
+    ]
+    followup = previous_review.model_copy(
+        update={
+            "passed": False,
+            "issues": [*preserved_issues, *_static_issues(article, analyzed, script.text)],
+            "summary": (
+                f"{previous_review.summary.rstrip()} "
+                "修订后已通过本地规则复核，未再次调用 LLM。"
+            ).strip(),
+            "review_mode": "static",
+            "source_sha256": _content_hash(article.full_text),
+            "title_sha256": _content_hash(analyzed.title_cn),
+            "script_sha256": _content_hash(script.text),
+        }
+    )
+    gate = evaluate_quality_gate(followup)
+    followup.passed = gate.passed
+    if gate.failed_thresholds:
+        failed = "、".join(gate.failed_thresholds)
+        followup.summary = f"{followup.summary} 未达到质量阈值：{failed}。"
+    return followup
+
+
 def _can_resume_quality_report(
     report: ContentQualityReport,
     article: ScrapedArticle,
@@ -687,6 +764,12 @@ def finalize_content(
         if current_review.passed or not _should_auto_rewrite(current_review, analyzed):
             break
         current_analysis = analyzed.model_copy(update={"title_cn": current_title})
+        previous_static_issues = _static_rewrite_issues(
+            current_review,
+            article,
+            current_analysis,
+            current_script,
+        )
         current_title, current_script = rewrite_content(
             article,
             current_analysis,
@@ -696,12 +779,21 @@ def finalize_content(
             date_str=date_str,
         )
         current_analysis = analyzed.model_copy(update={"title_cn": current_title})
-        current_review = review_content(
-            article,
-            current_analysis,
-            current_script,
-            llm,
-        )
+        if previous_static_issues is not None:
+            current_review = _build_static_followup_review(
+                current_review,
+                previous_static_issues,
+                article,
+                current_analysis,
+                current_script,
+            )
+        else:
+            current_review = review_content(
+                article,
+                current_analysis,
+                current_script,
+                llm,
+            )
         revisions.append(
             ContentRevision(
                 attempt=attempt,

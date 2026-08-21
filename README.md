@@ -567,7 +567,7 @@ audio.vtt              # TTS 时间字幕
 
 `content-review.json` 会记录 `review_mode`（`static` 或 `llm`）、`risk_level`（`low` 或 `high`）和 `risk_reasons`，便于确认某篇文章是否实际消耗了审校调用。由 critical 事实触发的原因会包含对应的 `F001` 形式编号，方便直接定位误判来源。审校和重写请求只发送文章标题、URL、`source_facts`、精简分析摘要、标题、当前播报稿和审校报告，不重复发送完整原文；完整原文仍保存在本地 `page.json`/`text.txt`，供流程追溯。
 
-质量门禁要求事实准确度至少 90、完整度至少 85、结构/口语性/标题质量至少 80、总分至少 85，且不能存在 `error` 或 `blocker`。未通过时默认最多自动修订一轮，且只有事实准确度错误/阻断问题，或明确关联 `critical` 事实的完整度错误/阻断问题，才会触发 LLM 重写；纯格式、风格、标题吸引力或缺少事实清单的问题不会盲目重写，会保留报告供人工处理或重新运行上游分析。修订预算会持久化到 `content-quality.json`，同一原文、分析、初稿和提示词版本重复执行 `finalize-content --force` 时会继承已用次数，不会再次获得一轮修订；只有这些输入或提示词版本变化时才会开始新的预算。修订后仍未通过则停止后续 TTS 和视频生成，保留 `content-quality.json`、`title-candidate.txt` 和 `script-candidate.txt` 供人工检查。最终 `title.txt` 和 `script.txt` 只在质量门禁通过后生成。
+质量门禁要求事实准确度至少 90、完整度至少 85、结构/口语性/标题质量至少 80、总分至少 85，且不能存在 `error` 或 `blocker`。未通过时默认最多自动修订一轮，且只有事实准确度错误/阻断问题，或明确关联 `critical` 事实的完整度错误/阻断问题，才会触发 LLM 重写；纯格式、风格、标题吸引力或缺少事实清单的问题不会盲目重写，会保留报告供人工处理或重新运行上游分析。修订后如果原问题仅是本地规则可以确定验证的数字、金额或比例错误，流程会使用本地规则复核，不再重复调用 LLM；涉及事实覆盖、人物、因果、引语归属或不确定性语气等语义问题时，仍会调用 LLM 进行二次审校。修订预算会持久化到 `content-quality.json`，同一原文、分析、初稿和提示词版本重复执行 `finalize-content --force` 时会继承已用次数，不会再次获得一轮修订；只有这些输入或提示词版本变化时才会开始新的预算。修订后仍未通过则停止后续 TTS 和视频生成，保留 `content-quality.json`、`title-candidate.txt` 和 `script-candidate.txt` 供人工检查。最终 `title.txt` 和 `script.txt` 只在质量门禁通过后生成。
 
 `content-quality.json` 中的 `max_revisions`、`revision_budget_used`、`revision_budget_remaining` 和 `revision_budget_exhausted` 会直接显示当前文章的累计质量修订预算状态。
 

@@ -187,6 +187,129 @@ def test_finalize_rewrites_and_reviews_until_quality_gate_passes():
     assert llm.complete.call_count == 2
 
 
+def test_finalize_uses_static_followup_for_numeric_issue():
+    llm = MagicMock()
+    article = ScrapedArticle(
+        title="Arsenal transfer fee reported",
+        link="https://example.com/article",
+        full_text="Arsenal are reported to be considering a transfer for £50 million.",
+    )
+    analyzed = _analyzed().model_copy(update={
+        "title_cn": "阿森纳完成5000万英镑转会",
+        "article_type": "转会动态",
+        "source_facts": [
+            SourceFact(
+                fact_id="F001",
+                claim="阿森纳以5000万英镑完成转会。",
+                evidence="Arsenal completed the transfer for £50 million.",
+                category="转会",
+                importance="critical",
+            )
+        ],
+    })
+    initial_script = PodcastScript(text=f"{OPENING}阿森纳完成转会。{ENDING}")
+    revised_script = PodcastScript(
+        text=f"{OPENING}阿森纳以5000万英镑完成转会。{ENDING}"
+    )
+    llm.complete.side_effect = [
+        _review_response(),
+        _rewrite_response(title=analyzed.title_cn, script=revised_script.text),
+    ]
+    initial_review = review_content(article, analyzed, initial_script, llm)
+
+    final_title, final_script, report = finalize_content(
+        article,
+        analyzed,
+        initial_script,
+        initial_review,
+        llm,
+        date_str="2026年8月18日",
+    )
+
+    assert final_title == analyzed.title_cn
+    assert final_script.text == revised_script.text
+    assert report.passed is True
+    assert report.final_review.review_mode == "static"
+    assert report.final_review.risk_level == "high"
+    assert "未再次调用 LLM" in report.final_review.summary
+    assert llm.complete.call_count == 2
+    assert llm.complete.call_args_list[-1].kwargs["stage"] == "finalize-content"
+
+
+def test_finalize_keeps_llm_followup_when_numeric_review_score_fails():
+    llm = MagicMock()
+    article = ScrapedArticle(
+        title="Arsenal transfer fee reported",
+        link="https://example.com/article",
+        full_text="Arsenal are reported to be considering a transfer for £50 million.",
+    )
+    analyzed = _analyzed().model_copy(update={
+        "title_cn": "阿森纳规划夏窗阵容",
+        "article_type": "转会动态",
+        "source_facts": [
+            SourceFact(
+                fact_id="F001",
+                claim="据报道，阿森纳正考虑一笔5000万英镑的转会。",
+                evidence="Arsenal are reported to be considering a £50 million transfer.",
+                category="转会",
+                importance="critical",
+            )
+        ],
+    })
+    initial_script = PodcastScript(
+        text=f"{OPENING}据报道，阿森纳正考虑一笔转会。{ENDING}"
+    )
+    initial_review = ContentReview(
+        passed=False,
+        scores=QualityScores(
+            factual_accuracy=70,
+            completeness=90,
+            structure=90,
+            spoken_style=90,
+            title_quality=90,
+            overall=80,
+        ),
+        issues=[
+            QualityIssue(
+                dimension="factual_accuracy",
+                severity="error",
+                description="F001 的数字、金额或比例未在播报稿中保持一致。",
+                evidence="据报道，阿森纳正考虑一笔5000万英镑的转会。",
+                suggestion="保留原文中的数字、金额或比例，不要改写或省略。",
+                fact_ids=["F001"],
+            )
+        ],
+        review_mode="llm",
+        risk_level="high",
+        source_sha256="source",
+        title_sha256="title",
+        script_sha256="script",
+    )
+    revised_script = PodcastScript(
+        text=f"{OPENING}据报道，阿森纳正考虑一笔5000万英镑的转会。{ENDING}"
+    )
+    llm.complete.side_effect = [
+        _rewrite_response(
+            title=analyzed.title_cn,
+            script=revised_script.text,
+        ),
+        _review_response(),
+    ]
+
+    _, _, report = finalize_content(
+        article,
+        analyzed,
+        initial_script,
+        initial_review,
+        llm,
+        date_str="2026年8月18日",
+    )
+
+    assert report.final_review.review_mode == "llm"
+    assert llm.complete.call_count == 2
+    assert llm.complete.call_args_list[-1].kwargs["stage"] == "review-content"
+
+
 def test_finalize_preserves_review_history_when_gate_never_passes():
     llm = MagicMock()
     revised_script = _script().text
