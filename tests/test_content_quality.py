@@ -1,7 +1,11 @@
 import json
 from unittest.mock import MagicMock
 
-from src.content_quality import finalize_content, review_content
+from src.content_quality import (
+    DETAIL_CONTEXT_MAX_CHARS,
+    finalize_content,
+    review_content,
+)
 from src.models import (
     AnalyzedArticle,
     ContentQualityReport,
@@ -136,6 +140,84 @@ def test_review_passes_when_scores_and_static_rules_pass():
     assert result.review_mode == "llm"
     assert result.risk_level == "high"
     assert "节目制作元数据" in system_prompt
+
+
+def test_review_payload_includes_analysis_detail_as_non_authoritative_context():
+    detail = "球迷们甚至能对厄德高踢到自己另一只脚导致球滑稽入网的失误发笑。"
+    analyzed = _analyzed().model_copy(update={"detail": detail})
+    script = PodcastScript(text=f"{OPENING}阿森纳轻松取胜。{detail}{ENDING}")
+    llm = MagicMock()
+    llm.complete.return_value = _review_response()
+
+    review_content(_high_risk_article(), analyzed, script, llm)
+
+    request = json.loads(llm.complete.call_args.args[1])
+    system_prompt = llm.complete.call_args.args[0]
+    assert request["analysis_summary"]["detail_context"] == detail
+    assert "不是独立证据" in system_prompt
+    assert "不能因为稿件内容出现在 detail_context 中就默认正确" in system_prompt
+    assert "source_facts/evidence" in system_prompt
+
+
+def test_rewrite_payload_includes_analysis_detail():
+    detail = "球迷们甚至能对厄德高踢到自己另一只脚导致球滑稽入网的失误发笑。"
+    analyzed = _analyzed().model_copy(update={"detail": detail})
+    llm = MagicMock()
+    llm.complete.side_effect = [
+        _rewrite_response(),
+        _review_response(),
+    ]
+
+    finalize_content(
+        _high_risk_article(),
+        analyzed,
+        _script(),
+        _failed_review(),
+        llm,
+        date_str="2026年8月18日",
+    )
+
+    rewrite_call = llm.complete.call_args_list[0]
+    request = json.loads(rewrite_call.args[1])
+    system_prompt = rewrite_call.args[0]
+    assert rewrite_call.kwargs["stage"] == "finalize-content"
+    assert request["analysis_summary"]["detail_context"] == detail
+    assert "不是事实证据" in system_prompt
+    assert "与 source_facts 冲突" in system_prompt
+
+
+def test_review_prompt_prioritizes_source_facts_over_conflicting_detail():
+    detail = "孔萨以4000万英镑加盟阿森纳。"
+    analyzed = _analyzed().model_copy(update={"detail": detail})
+    llm = MagicMock()
+    llm.complete.return_value = _review_response()
+
+    review_content(
+        _high_risk_article(),
+        analyzed,
+        _script(),
+        llm,
+    )
+
+    system_prompt = llm.complete.call_args.args[0]
+    assert "source_facts 及其中的 evidence 是唯一的可验证事实依据" in system_prompt
+    assert "以 source_facts 为准" in system_prompt
+
+
+def test_detail_context_is_bounded_for_llm_requests():
+    detail = "开头重要细节。" + ("中间分析内容。" * 500) + "结尾重要细节。"
+    analyzed = _analyzed().model_copy(update={"detail": detail})
+    llm = MagicMock()
+    llm.complete.return_value = _review_response()
+
+    review_content(_high_risk_article(), analyzed, _script(), llm)
+
+    request = json.loads(llm.complete.call_args.args[1])
+    context = request["analysis_summary"]["detail_context"]
+    assert len(context) <= DETAIL_CONTEXT_MAX_CHARS
+    assert context.startswith("开头重要细节。")
+    assert context.endswith("结尾重要细节。")
+    assert "detail_context 已截断" in context
 
 
 def test_review_rejects_low_scores_even_if_llm_marks_passed():

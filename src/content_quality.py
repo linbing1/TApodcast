@@ -19,9 +19,10 @@ from src.models import (
 )
 
 
-REVIEW_PROMPT_VERSION = "content-reviewer-v4"
-REWRITE_PROMPT_VERSION = "content-rewriter-v4"
+REVIEW_PROMPT_VERSION = "content-reviewer-v6"
+REWRITE_PROMPT_VERSION = "content-rewriter-v6"
 MAX_REVISIONS = 1
+DETAIL_CONTEXT_MAX_CHARS = 1600
 
 _SCORE_THRESHOLDS = {
     "factual_accuracy": 90,
@@ -128,7 +129,7 @@ _SEVERE_HARM_PATTERN = re.compile(
 _REVIEW_SYSTEM_PROMPT = """你是一位严谨的中文体育内容总编，负责检查短视频播报稿是否忠实、完整、清晰且适合口播。
 
 审校原则：
-1. source_facts 是事实核对的主依据。不得用常识补充 source_facts 没有的信息。
+1. source_facts 及其中的 evidence 是唯一的可验证事实依据。analysis_summary.detail_context 是前一步 LLM 生成的分析上下文，不是独立证据，只用于理解文章叙事，且可能被截断。不能因为稿件内容出现在 detail_context 中就默认正确；稿件中的具体事例、引语、数字或因果关系必须能由 source_facts/evidence 支持。detail_context 与 source_facts 冲突时，以 source_facts 为准；source_facts/evidence 都无法支持的内容必须指出。不得用常识补充 source_facts 没有的信息。
 2. 逐项核对 source_facts，所有 importance=critical 的事实都必须准确覆盖。
 3. 检查人物、俱乐部、金额、日期、数字、引语归属、因果关系和不确定性措辞。
 4. 区分原文事实、原文观点和未来推测，不得把传闻写成已发生事实。
@@ -167,6 +168,7 @@ _REWRITE_SYSTEM_PROMPT = """你是一位资深中文体育播报稿编辑。请�
 
 必须遵守：
 - 原文是唯一事实来源，不得添加原文没有的信息、评论或推测
+- analysis_summary.detail_context 只是前一步 LLM 生成的上下文，不是事实证据；修订时只能保留与 source_facts/evidence 一致的具体事例和细节。若 detail_context 与 source_facts 冲突，以 source_facts 为准；不得添加 source_facts/evidence 都没有的信息
 - 准确覆盖所有 critical source_facts
 - 保留人物、俱乐部、金额、日期、数字、引语归属和不确定性措辞
 - 开头固定为“欢迎收听英超每日观察，今天是{date_str}，”
@@ -212,6 +214,17 @@ def _analysis_hash(analyzed: AnalyzedArticle) -> str:
 def _normalize_title(value: object, fallback: str) -> str:
     title = " ".join(str(value or "").split()).strip("\"'“”‘’# ")[:30]
     return title or fallback
+
+
+def _detail_context(value: str) -> str:
+    value = value.strip()
+    if len(value) <= DETAIL_CONTEXT_MAX_CHARS:
+        return value
+    marker = "\n[…detail_context 已截断…]\n"
+    available = DETAIL_CONTEXT_MAX_CHARS - len(marker)
+    head_length = max(1, available * 2 // 3)
+    tail_length = max(1, available - head_length)
+    return f"{value[:head_length]}{marker}{value[-tail_length:]}"
 
 
 def _normalize_match_text(value: str) -> str:
@@ -634,6 +647,7 @@ def review_content(
         "analysis_summary": {
             "article_type": analyzed.article_type,
             "overview": analyzed.overview,
+            "detail_context": _detail_context(analyzed.detail),
             "key_people_and_data": analyzed.key_people_and_data,
             "impact": analyzed.impact,
         },
@@ -692,6 +706,7 @@ def rewrite_content(
         "analysis_summary": {
             "article_type": analyzed.article_type,
             "overview": analyzed.overview,
+            "detail_context": _detail_context(analyzed.detail),
             "key_people_and_data": analyzed.key_people_and_data,
             "impact": analyzed.impact,
         },
