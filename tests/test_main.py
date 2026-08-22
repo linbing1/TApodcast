@@ -14,8 +14,9 @@ from main import (
     run_cover_only,
     run_pipeline_step,
     run_publish_only,
+    write_script_draft,
 )
-from src.models import ImageAsset, PageContent, VideoAsset
+from src.models import ImageAsset, PageContent, PodcastScript, ScrapedArticle, VideoAsset
 from src.pipeline import PipelineContext
 
 
@@ -262,6 +263,33 @@ async def test_generate_audio_runs_audio_assets_only(mock_audio_assets, tmp_path
 
     assert result == str(output_dir)
     mock_audio_assets.assert_awaited_once_with(str(output_dir))
+
+
+def test_write_script_draft_passes_linear_source_length_target(tmp_path):
+    output_dir = tmp_path / "article"
+    output_dir.mkdir()
+    (output_dir / "analysis.json").write_text("{}", encoding="utf-8")
+    analyzed = object()
+    llm = object()
+
+    with (
+        patch("main._load_source_article") as mock_load_source,
+        patch("main.load_analyzed_article", return_value=analyzed),
+        patch("main._create_llm_client", return_value=llm),
+        patch("main.write_script", return_value=PodcastScript(text="稿件")) as mock_write,
+    ):
+        mock_load_source.return_value = ScrapedArticle(
+            title="测试文章",
+            link="https://example.com/article",
+            full_text="阿" * 10_000,
+        )
+
+        result = write_script_draft(str(output_dir))
+
+    assert result == str(output_dir)
+    assert mock_write.call_args.args == (analyzed, llm)
+    assert mock_write.call_args.kwargs["target_chars"] == 800
+    assert (output_dir / "script-draft.txt").read_text(encoding="utf-8") == "稿件"
 
 
 @pytest.mark.asyncio

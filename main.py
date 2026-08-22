@@ -41,8 +41,12 @@ from src.models import (
 from src.pipeline import PipelineContext, PipelineRunner, PipelineStep
 from src.publish_copy import PROMPT_VERSION as PUBLISH_PROMPT_VERSION
 from src.publish_copy import generate_publish_copy
-from src.script_writer import PROMPT_VERSION as SCRIPT_PROMPT_VERSION
-from src.script_writer import write_script
+from src.script_writer import (
+    PROMPT_VERSION as SCRIPT_PROMPT_VERSION,
+    calculate_target_script_chars,
+    count_source_chars,
+    write_script,
+)
 from src.scraper import download_images as download_image_assets
 from src.scraper import extract_page_content
 from src.storage import atomic_write_text
@@ -363,15 +367,27 @@ def write_script_draft(
     analysis_path = os.path.join(output_dir, "analysis.json")
     if not os.path.exists(analysis_path):
         raise FileNotFoundError(f"Article analysis not found: {analysis_path}")
+    source_article = _load_source_article(output_dir)
     analyzed = load_analyzed_article(analysis_path)
+    source_chars = count_source_chars(source_article.full_text)
+    target_chars = calculate_target_script_chars(source_chars)
     llm = _create_llm_client(
         output_dir,
         cache_enabled=cache_enabled,
         usage_callback=usage_callback,
     )
 
-    logger.info("Writing first podcast script draft...")
-    script = write_script(analyzed, llm, date_str=_speech_date())
+    logger.info(
+        "Writing first podcast script draft (source=%d chars, target=%d chars)...",
+        source_chars,
+        target_chars,
+    )
+    script = write_script(
+        analyzed,
+        llm,
+        date_str=_speech_date(),
+        target_chars=target_chars,
+    )
     atomic_write_text(os.path.join(output_dir, "script-draft.txt"), script.text)
     logger.info("Draft output: %s", os.path.join(output_dir, "script-draft.txt"))
     return output_dir

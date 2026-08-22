@@ -1,7 +1,13 @@
 from unittest.mock import MagicMock
 
 from src.models import AnalyzedArticle, PodcastScript, SourceFact
-from src.script_writer import write_script
+from src.script_writer import (
+    MAX_SCRIPT_CHARS,
+    MIN_SCRIPT_CHARS,
+    calculate_target_script_chars,
+    count_source_chars,
+    write_script,
+)
 
 
 def _in_range_script() -> str:
@@ -71,3 +77,37 @@ class TestWriteScript:
 
         assert result.text == short_script
         assert mock_llm.complete.call_count == 1
+
+    def test_includes_target_length_without_repeating_source_text(self):
+        mock_llm = MagicMock()
+        mock_llm.complete.return_value = _in_range_script()
+
+        write_script(_make_analyzed(), mock_llm, target_chars=770)
+
+        _, user_arg = mock_llm.complete.call_args.args
+        assert "目标播报稿总长度约为 770 字" in user_arg
+        assert "不需要后续再次调用模型压缩或扩充" in user_arg
+
+
+def test_count_source_chars_removes_whitespace():
+    assert count_source_chars("阿森纳\n 主场\t击败 曼城") == 9
+
+
+def test_calculate_target_script_chars_uses_linear_formula():
+    assert calculate_target_script_chars(3_000) == 520
+    assert calculate_target_script_chars(8_000) == 720
+    assert calculate_target_script_chars(10_000) == 800
+
+
+def test_calculate_target_script_chars_applies_bounds():
+    assert calculate_target_script_chars(0) == MIN_SCRIPT_CHARS
+    assert calculate_target_script_chars(100_000) == MAX_SCRIPT_CHARS
+
+
+def test_calculate_target_script_chars_rejects_negative_source_length():
+    try:
+        calculate_target_script_chars(-1)
+    except ValueError as exc:
+        assert str(exc) == "source_chars must be non-negative"
+    else:
+        raise AssertionError("negative source length should fail")
