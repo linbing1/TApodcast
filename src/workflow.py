@@ -188,29 +188,40 @@ async def download_images_command(output_dir: str) -> str:
         cookies=config["athletic_cookies"],
         cover_image_index=page.cover_image_index,
     )
+    downloaded = sum(record["status"] == "downloaded" for record in records)
+    if downloaded == 0:
+        for filename in ("images.json", "cover.json"):
+            Path(output_dir, filename).unlink(missing_ok=True)
+        raise ValueError(f"Failed to download any images listed in: {page_path}")
+
+    cover_record = next(
+        (record for record in records if record.get("is_cover")),
+        None,
+    )
+    if cover_record is None:
+        raise ValueError(f"No usable cover image found in: {page_path}")
+
     write_artifact(
         os.path.join(output_dir, "images.json"),
         ImageManifest(images=[ImageRecord.model_validate(record) for record in records]),
     )
 
-    cover_index = page.cover_image_index
-    cover_local_path = None
-    if isinstance(cover_index, int) and 0 <= cover_index < len(records):
-        cover_record = records[cover_index]
-        if cover_record["status"] == "downloaded":
-            cover_local_path = cover_record["local_path"]
+    cover_index = records.index(cover_record)
+    cover_local_path = cover_record["local_path"]
+    cover_image_url = (
+        page.cover_image_url
+        if cover_index == page.cover_image_index
+        else cover_record["url"]
+    )
     write_artifact(
         os.path.join(output_dir, "cover.json"),
         CoverManifest(
             image_index=cover_index,
-            image_url=page.cover_image_url,
+            image_url=cover_image_url,
             local_path=cover_local_path,
         ),
     )
 
-    downloaded = sum(record["status"] == "downloaded" for record in records)
-    if downloaded == 0:
-        raise ValueError(f"Failed to download any images listed in: {page_path}")
     logger.info("Image download result: %d/%d succeeded", downloaded, len(records))
     logger.info("Image output: %s", os.path.join(output_dir, "images"))
     return output_dir

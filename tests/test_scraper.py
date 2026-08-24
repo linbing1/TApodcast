@@ -1,5 +1,8 @@
+import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from PIL import Image as PILImage
 
@@ -10,6 +13,7 @@ from src.scraper import (
     _merge_images,
     _select_cover_image,
     _split_caption_credit,
+    _download_image,
     download_images,
 )
 
@@ -165,3 +169,153 @@ async def test_download_images_returns_local_manifest(
     headers = mock_client.get.call_args.kwargs["headers"]
     assert headers["Referer"] == "https://example.com/article"
     assert headers["Cookie"] == "sid=abc"
+
+
+@pytest.mark.asyncio
+async def test_download_image_does_not_retry_non_retryable_http_error(tmp_path):
+    url = "https://cdn.example.com/missing.jpg"
+    client = AsyncMock()
+    client.get.return_value = httpx.Response(
+        404,
+        request=httpx.Request("GET", url),
+    )
+
+    with patch("src.scraper.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await _download_image(client, url, str(tmp_path / "image.jpg"))
+
+    assert result == (None, "HTTP 404")
+    client.get.assert_awaited_once()
+    mock_sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@patch("src.scraper.PILImage")
+async def test_download_image_retries_network_errors(mock_pil, tmp_path):
+    url = "https://cdn.example.com/retry.jpg"
+    client = AsyncMock()
+    response = MagicMock()
+    response.content = b"fake-image-data"
+    response.raise_for_status = MagicMock()
+    client.get.side_effect = [
+        httpx.ConnectError("temporary failure"),
+        httpx.ConnectError("temporary failure"),
+        response,
+    ]
+    mock_pil.open.return_value = _make_pil_mock(800, 600)
+
+    with patch("src.scraper.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await _download_image(client, url, str(tmp_path / "image.jpg"))
+
+    assert result == (str(tmp_path / "image.jpg"), None)
+    assert client.get.await_count == 3
+    assert [call.args[0] for call in mock_sleep.await_args_list] == [1, 2]
+
+
+@pytest.mark.asyncio
+@patch("src.scraper.httpx.AsyncClient")
+async def test_download_images_falls_back_to_first_successful_cover(
+    mock_httpx_cls, tmp_path
+):
+    mock_client = AsyncMock()
+    mock_httpx_cls.return_value.__aenter__.return_value = mock_client
+
+    async def fake_download(client, url, path, headers=None):
+        if url.endswith("lead.jpg"):
+            return None, "HTTP 404"
+        return path, None
+
+    images = [
+        ImageAsset(url="https://cdn.example.com/lead.jpg"),
+        ImageAsset(url="https://cdn.example.com/body.jpg"),
+    ]
+    with patch("src.scraper._download_image", side_effect=fake_download):
+        records = await download_images(images, str(tmp_path), cover_image_index=0)
+
+    assert records[0]["status"] == "failed"
+    assert records[0]["is_cover"] is False
+    assert records[1]["status"] == "downloaded"
+    assert records[1]["is_cover"] is True
+
+
+@pytest.mark.asyncio
+@patch("src.scraper.httpx.AsyncClient")
+@patch("src.scraper._download_image", new_callable=AsyncMock)
+async def test_download_images_reuses_existing_successful_image(
+    mock_download, mock_httpx_cls, tmp_path
+):
+    mock_client = AsyncMock()
+    mock_httpx_cls.return_value.__aenter__.return_value = mock_client
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    (images_dir / "000.jpg").write_bytes(b"existing-image")
+    (tmp_path / "images.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "images": [{
+                "url": "https://cdn.example.com/image.jpg",
+                "local_path": "images/000.jpg",
+                "status": "downloaded",
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    records = await download_images(
+        [ImageAsset(url="https://cdn.example.com/image.jpg")],
+        str(tmp_path),
+        cover_image_index=0,
+    )
+
+    assert records[0]["status"] == "downloaded"
+    assert records[0]["is_cover"] is True
+    mock_download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@patch("src.scraper.httpx.AsyncClient")
+@patch("src.scraper._download_image", new_callable=AsyncMock)
+async def test_download_images_removes_stale_jpg_files(
+    mock_download, mock_httpx_cls, tmp_path
+):
+    mock_client = AsyncMock()
+    mock_httpx_cls.return_value.__aenter__.return_value = mock_client
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    (images_dir / "000.jpg").write_bytes(b"old-image")
+    (images_dir / "999.jpg").write_bytes(b"stale-image")
+    mock_download.return_value = (str(images_dir / "000.jpg"), None)
+
+    await download_images(
+        [ImageAsset(url="https://cdn.example.com/image.jpg")],
+        str(tmp_path),
+        cover_image_index=0,
+    )
+
+    assert (images_dir / "000.jpg").exists()
+    assert not (images_dir / "999.jpg").exists()
+
+
+@pytest.mark.asyncio
+@patch("src.scraper.httpx.AsyncClient")
+async def test_download_images_limits_concurrent_downloads(mock_httpx_cls, tmp_path):
+    mock_client = AsyncMock()
+    mock_httpx_cls.return_value.__aenter__.return_value = mock_client
+    active_downloads = 0
+    max_active_downloads = 0
+
+    async def fake_download(client, url, path, headers=None):
+        nonlocal active_downloads, max_active_downloads
+        active_downloads += 1
+        max_active_downloads = max(max_active_downloads, active_downloads)
+        await asyncio.sleep(0)
+        active_downloads -= 1
+        return path, None
+
+    images = [
+        ImageAsset(url=f"https://cdn.example.com/{index}.jpg")
+        for index in range(8)
+    ]
+    with patch("src.scraper._download_image", side_effect=fake_download):
+        await download_images(images, str(tmp_path), cover_image_index=0)
+
+    assert max_active_downloads <= 6

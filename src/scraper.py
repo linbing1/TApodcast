@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-import shutil
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -12,9 +11,9 @@ import httpx
 from PIL import Image as PILImage
 from playwright.async_api import Page, async_playwright
 
+from src.artifacts import load_image_manifest
 from src.models import (
     ImageAsset,
-    ImageManifest,
     ImageRecord,
     PageContent,
     VideoAsset,
@@ -22,6 +21,8 @@ from src.models import (
 
 _MIN_WIDTH = 600
 _MIN_HEIGHT = 300
+_MAX_IMAGE_ATTEMPTS = 3
+_MAX_CONCURRENT_IMAGE_DOWNLOADS = 6
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -616,35 +617,81 @@ async def _download_image(
     img_url: str,
     path: str,
     headers: dict[str, str] | None = None,
-) -> str | None:
-    for attempt in range(3):
+) -> tuple[str | None, str | None]:
+    last_error = "download failed"
+    for attempt in range(_MAX_IMAGE_ATTEMPTS):
+        response = None
         try:
-            resp = await client.get(img_url, headers=headers)
-            resp.raise_for_status()
-        except Exception:
-            if attempt == 2:
-                logger.warning("Failed to download image after 3 attempts: %s", img_url[:80])
-                return None
-            await asyncio.sleep(2)
-            continue
+            response = await client.get(img_url, headers=headers)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            status_code = error.response.status_code
+            last_error = f"HTTP {status_code}"
+            response = None
+            if status_code < 500 and status_code != 429:
+                logger.info(
+                    "Skipping image with non-retryable response %s: %s",
+                    status_code,
+                    img_url[:60],
+                )
+                return None, last_error
+            if attempt + 1 < _MAX_IMAGE_ATTEMPTS:
+                await asyncio.sleep(2**attempt)
+                continue
+        except (httpx.RequestError, httpx.TimeoutException) as error:
+            last_error = str(error) or error.__class__.__name__
+            response = None
+            if attempt + 1 < _MAX_IMAGE_ATTEMPTS:
+                await asyncio.sleep(2**attempt)
+                continue
+        except Exception as error:
+            last_error = str(error) or error.__class__.__name__
+            response = None
+            if attempt + 1 < _MAX_IMAGE_ATTEMPTS:
+                await asyncio.sleep(2**attempt)
+                continue
+
+        if response is None:
+            logger.warning(
+                "Failed to download image after %d attempts: %s (%s)",
+                _MAX_IMAGE_ATTEMPTS,
+                img_url[:80],
+                last_error,
+            )
+            return None, last_error
 
         try:
-            pil = PILImage.open(io.BytesIO(resp.content))
+            pil = PILImage.open(io.BytesIO(response.content))
             w, h = pil.size
             pil.load()
         except Exception as e:
             logger.info("Skipping corrupt image %s: %s", img_url[:60], e)
-            return None
+            return None, f"invalid image: {e}"
 
         if w < _MIN_WIDTH or h < _MIN_HEIGHT:
             logger.info("Skipping small image %dx%d: %s", w, h, img_url[:60])
-            return None
+            return None, f"image too small: {w}x{h}"
 
-        pil.convert("RGB").save(path, "JPEG", quality=92)
+        try:
+            pil.convert("RGB").save(path, "JPEG", quality=92)
+        except Exception as error:
+            logger.info("Failed to save image %s: %s", img_url[:60], error)
+            return None, f"failed to save image: {error}"
         logger.info("Downloaded image (%dx%d): %s", w, h, img_url[:80])
-        return path
+        return path, None
 
-    return None
+    return None, last_error
+
+
+def _load_reusable_image_records(output_dir: str) -> list[ImageRecord]:
+    manifest_path = os.path.join(output_dir, "images.json")
+    if not os.path.exists(manifest_path):
+        return []
+    try:
+        return load_image_manifest(manifest_path).images
+    except Exception as error:
+        logger.warning("Ignoring invalid existing image manifest: %s", error)
+        return []
 
 
 async def download_images(
@@ -655,9 +702,17 @@ async def download_images(
     cover_image_index: int | None = None,
 ) -> list[dict[str, Any]]:
     images_dir = os.path.join(output_dir, "images")
-    if os.path.exists(images_dir):
-        shutil.rmtree(images_dir)
     os.makedirs(images_dir, exist_ok=True)
+    expected_names = {f"{index:03d}.jpg" for index in range(len(images))}
+    for existing_name in os.listdir(images_dir):
+        existing_path = os.path.join(images_dir, existing_name)
+        if (
+            existing_name.endswith(".jpg")
+            and existing_name not in expected_names
+            and os.path.isfile(existing_path)
+        ):
+            os.remove(existing_path)
+    reusable_records = _load_reusable_image_records(output_dir)
 
     headers = {"User-Agent": _USER_AGENT}
     if referer:
@@ -667,15 +722,44 @@ async def download_images(
         headers["Cookie"] = cookie_value
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        async def download_one(index: int, image: ImageAsset) -> ImageRecord:
+        semaphore = asyncio.Semaphore(_MAX_CONCURRENT_IMAGE_DOWNLOADS)
+
+        async def download_one(index: int, image: ImageAsset) -> dict[str, Any]:
             relative_path = os.path.join("images", f"{index:03d}.jpg")
             absolute_path = os.path.join(output_dir, relative_path)
-            local_path = await _download_image(client, image.url, absolute_path, headers=headers)
+            existing = reusable_records[index] if index < len(reusable_records) else None
+            if (
+                existing
+                and existing.status == "downloaded"
+                and existing.url == image.url
+                and os.path.isfile(absolute_path)
+            ):
+                logger.info("Reusing downloaded image: %s", image.url[:80])
+                return ImageRecord(
+                    url=image.url,
+                    local_path=relative_path,
+                    status="downloaded",
+                    error=None,
+                    alt=image.alt,
+                    caption=image.caption,
+                    credit=image.credit,
+                    width=image.width,
+                    height=image.height,
+                    is_cover=index == cover_image_index,
+                ).model_dump()
+
+            async with semaphore:
+                local_path, error = await _download_image(
+                    client,
+                    image.url,
+                    absolute_path,
+                    headers=headers,
+                )
             return ImageRecord(
                 url=image.url,
                 local_path=relative_path,
                 status="downloaded" if local_path else "failed",
-                error=None if local_path else "download failed after 3 attempts",
+                error=error,
                 alt=image.alt,
                 caption=image.caption,
                 credit=image.credit,
@@ -689,5 +773,18 @@ async def download_images(
         )
 
     downloaded = sum(record["status"] == "downloaded" for record in records)
+    if downloaded:
+        successful_indices = [
+            index
+            for index, record in enumerate(records)
+            if record["status"] == "downloaded"
+        ]
+        resolved_cover_index = (
+            cover_image_index
+            if cover_image_index in successful_indices
+            else successful_indices[0]
+        )
+        for index, record in enumerate(records):
+            record["is_cover"] = index == resolved_cover_index
     logger.info("Downloaded %d/%d images to %s", downloaded, len(records), images_dir)
     return records

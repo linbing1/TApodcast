@@ -268,6 +268,7 @@ async def test_download_images_command_reads_manifest_and_writes_results(
         "local_path": "images/000.jpg",
         "status": "downloaded",
         "error": None,
+        "is_cover": True,
     }]
 
     result = await download_images_command(str(output_dir))
@@ -283,6 +284,90 @@ async def test_download_images_command_reads_manifest_and_writes_results(
         "local_path": "images/000.jpg",
     }
     mock_download.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@patch("src.workflow.get_config")
+@patch("src.workflow.download_image_assets", new_callable=AsyncMock)
+async def test_download_images_command_writes_fallback_cover(
+    mock_download, mock_get_config, tmp_path
+):
+    mock_get_config.return_value = {"athletic_cookies": []}
+    output_dir = tmp_path / "extracted"
+    output_dir.mkdir()
+    (output_dir / "page.json").write_text(
+        json.dumps({
+            "url": "https://example.com/article",
+            "images": [
+                {"url": "https://cdn.example.com/lead.jpg"},
+                {"url": "https://cdn.example.com/body.jpg"},
+            ],
+            "cover_image_index": 0,
+            "cover_image_url": "https://cdn.example.com/lead.jpg",
+        }),
+        encoding="utf-8",
+    )
+    mock_download.return_value = [
+        {
+            "url": "https://cdn.example.com/lead.jpg",
+            "local_path": "images/000.jpg",
+            "status": "failed",
+            "error": "HTTP 404",
+            "is_cover": False,
+        },
+        {
+            "url": "https://cdn.example.com/body.jpg",
+            "local_path": "images/001.jpg",
+            "status": "downloaded",
+            "error": None,
+            "is_cover": True,
+        },
+    ]
+
+    await download_images_command(str(output_dir))
+
+    cover = json.loads((output_dir / "cover.json").read_text(encoding="utf-8"))
+    assert cover == {
+        "schema_version": 1,
+        "image_index": 1,
+        "image_url": "https://cdn.example.com/body.jpg",
+        "local_path": "images/001.jpg",
+    }
+
+
+@pytest.mark.asyncio
+@patch("src.workflow.get_config")
+@patch("src.workflow.download_image_assets", new_callable=AsyncMock)
+async def test_download_images_command_removes_manifests_when_all_images_fail(
+    mock_download, mock_get_config, tmp_path
+):
+    mock_get_config.return_value = {"athletic_cookies": []}
+    output_dir = tmp_path / "extracted"
+    output_dir.mkdir()
+    (output_dir / "page.json").write_text(
+        json.dumps({
+            "url": "https://example.com/article",
+            "images": [{"url": "https://cdn.example.com/image.jpg"}],
+            "cover_image_index": 0,
+            "cover_image_url": "https://cdn.example.com/image.jpg",
+        }),
+        encoding="utf-8",
+    )
+    (output_dir / "images.json").write_text("old manifest", encoding="utf-8")
+    (output_dir / "cover.json").write_text("old cover", encoding="utf-8")
+    mock_download.return_value = [{
+        "url": "https://cdn.example.com/image.jpg",
+        "local_path": "images/000.jpg",
+        "status": "failed",
+        "error": "HTTP 404",
+        "is_cover": False,
+    }]
+
+    with pytest.raises(ValueError, match="Failed to download any images"):
+        await download_images_command(str(output_dir))
+
+    assert not (output_dir / "images.json").exists()
+    assert not (output_dir / "cover.json").exists()
 
 
 @pytest.mark.asyncio
