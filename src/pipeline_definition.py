@@ -184,7 +184,7 @@ def _build_pipeline_runner(context: PipelineContext) -> PipelineRunner:
         PipelineStep(
             name="cover",
             action=_pipeline_cover,
-            inputs=_static_paths("images", "cover.json", "title.txt"),
+            inputs=_static_paths("images.json", "cover.json", "title.txt"),
             outputs=_cover_output_paths,
         ),
         PipelineStep(

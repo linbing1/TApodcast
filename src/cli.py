@@ -87,14 +87,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vid.add_argument("--force", action="store_true", help="Regenerate this stage")
 
-    cover = sub.add_parser("cover", help="Generate a Douyin cover from existing images")
-    cover.add_argument("--dir", required=True, help="Output directory containing images/")
+    cover = sub.add_parser("cover", help="Generate a Douyin cover from image manifests")
+    cover.add_argument("--dir", required=True, help="Output directory containing images.json")
     cover.add_argument("--title", default="", help="Cover title (reads title.txt if omitted)")
     cover.add_argument(
         "--image-index",
         type=int,
         default=None,
-        help="Override the image index selected during extraction",
+        help="Override the downloaded image index in images.json",
     )
     cover.add_argument("--kicker", default="英超新闻 · 深度报道", help="Small label above the title")
     cover.add_argument("--subtitle", default="", help="Optional supporting line below the title")

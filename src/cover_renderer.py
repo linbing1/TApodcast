@@ -1,11 +1,12 @@
-import json
 import logging
 import os
+import tempfile
 from datetime import date
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+from src.artifacts import load_cover_manifest, load_image_manifest
 from src.subtitle_renderer import find_cjk_font
 
 logger = logging.getLogger(__name__)
@@ -404,11 +405,7 @@ def render_cover(
         brand,
         date_text or _format_cover_date(),
     )
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    canvas.convert("RGB").save(output, "PNG", optimize=True)
-    logger.info("Cover saved to %s", output)
-    return str(output)
+    return _save_cover(canvas, output_path, (COVER_WIDTH, COVER_HEIGHT), "Cover")
 
 
 def _draw_landscape_text(
@@ -489,10 +486,56 @@ def render_cover_landscape(
         brand,
         date_text or _format_cover_date(),
     )
+    return _save_cover(
+        canvas,
+        output_path,
+        (LAND_WIDTH, LAND_HEIGHT),
+        "Landscape cover",
+    )
+
+
+def validate_cover(path: str, expected_size: tuple[int, int]) -> None:
+    output = Path(path)
+    if not output.is_file():
+        raise FileNotFoundError(f"Cover was not created: {output}")
+    if output.stat().st_size == 0:
+        raise ValueError(f"Cover is empty: {output}")
+
+    try:
+        with Image.open(output) as image:
+            actual_size = image.size
+            image.verify()
+    except (OSError, ValueError) as error:
+        raise ValueError(f"Cover is not a valid image: {output}") from error
+
+    if actual_size != expected_size:
+        raise ValueError(
+            f"Cover size is {actual_size}, expected {expected_size}: {output}"
+        )
+
+
+def _save_cover(
+    canvas: Image.Image,
+    output_path: str,
+    expected_size: tuple[int, int],
+    label: str,
+) -> str:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    canvas.convert("RGB").save(output, "PNG", optimize=True)
-    logger.info("Landscape cover saved to %s", output)
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=f".{output.name}.",
+        suffix=".tmp.png",
+        dir=output.parent,
+    )
+    os.close(descriptor)
+    try:
+        canvas.convert("RGB").save(temporary_path, "PNG", optimize=True)
+        validate_cover(temporary_path, expected_size)
+        os.replace(temporary_path, output)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+    logger.info("%s saved to %s", label, output)
     return str(output)
 
 
@@ -501,48 +544,117 @@ def _resolve_cover_inputs(
     title: str,
     image_index: int | None,
 ) -> tuple[Path, str]:
-    image_dir = Path(output_dir) / "images"
-    image_paths = sorted(
-        path for path in image_dir.iterdir()
-        if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-    ) if image_dir.exists() else []
-    if not image_paths:
-        raise FileNotFoundError(f"No images found in {image_dir}")
+    output_path = Path(output_dir)
+    image_manifest_path = output_path / "images.json"
+    if not image_manifest_path.exists():
+        raise FileNotFoundError(f"Image manifest not found: {image_manifest_path}")
+    image_manifest = load_image_manifest(image_manifest_path)
 
-    if image_index is None:
-        metadata_paths = [Path(output_dir) / "page.json", Path(output_dir) / "cover.json"]
-        for metadata_path in metadata_paths:
-            if not metadata_path.exists():
-                continue
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if metadata.get("cover_image_index") is not None:
-                image_index = int(metadata["cover_image_index"])
-                break
-            if metadata.get("image_index") is not None:
-                image_index = int(metadata["image_index"])
-                break
-        if image_index is None:
-            image_index = 0
+    def resolve_local_path(local_path: str) -> Path | None:
+        if not local_path:
+            return None
+        candidate = Path(local_path)
+        resolved = candidate if candidate.is_absolute() else output_path / candidate
+        return resolved if resolved.is_file() else None
 
-    indexed_path = image_dir / f"{image_index:03d}.jpg"
-    if indexed_path.exists():
-        image_path = indexed_path
-    elif image_index < 0 or image_index >= len(image_paths):
-        raise IndexError(f"Image index {image_index} is out of range for {image_dir}")
+    if image_index is not None:
+        if image_index < 0 or image_index >= len(image_manifest.images):
+            raise IndexError(
+                f"Image index {image_index} is out of range for {image_manifest_path}"
+            )
+        selected = image_manifest.images[image_index]
+        image_path = (
+            resolve_local_path(selected.local_path)
+            if selected.status == "downloaded"
+            else None
+        )
+        if image_path is None:
+            raise FileNotFoundError(
+                f"Selected cover image is not usable: index {image_index}"
+            )
     else:
-        image_path = image_paths[image_index]
+        image_path = None
+        cover_manifest_path = output_path / "cover.json"
+        if cover_manifest_path.exists():
+            try:
+                cover_manifest = load_cover_manifest(cover_manifest_path)
+                image_path = resolve_local_path(cover_manifest.local_path or "")
+            except ValueError as error:
+                logger.warning("Ignoring invalid cover manifest: %s", error)
+        if image_path is None:
+            selected = next(
+                (
+                    record
+                    for record in image_manifest.images
+                    if record.is_cover and record.status == "downloaded"
+                ),
+                None,
+            )
+            if selected is None:
+                selected = next(
+                    (
+                        record
+                        for record in image_manifest.images
+                        if record.status == "downloaded"
+                    ),
+                    None,
+                )
+            if selected is not None:
+                image_path = resolve_local_path(selected.local_path)
+        if image_path is None:
+            raise FileNotFoundError(
+                f"No usable downloaded cover image listed in: {image_manifest_path}"
+            )
 
     if not title:
-        for title_name in ("title.txt", "publish_title.txt"):
-            title_path = Path(output_dir) / title_name
-            if title_path.exists():
-                title = title_path.read_text(encoding="utf-8").strip()
-                if title:
-                    break
+        title_path = output_path / "title.txt"
+        if title_path.exists():
+            title = title_path.read_text(encoding="utf-8").strip()
     if not title:
         raise ValueError(f"No cover title found in {output_dir}")
 
     return image_path, title
+
+
+def generate_covers(
+    output_dir: str,
+    title: str = "",
+    image_index: int | None = None,
+    kicker: str = "英超新闻 · 深度报道",
+    subtitle: str = "",
+    brand: str = "英超每日观察",
+    date_text: str = "",
+    output_name: str = "cover.png",
+    orientation: str = "both",
+) -> list[str]:
+    image_path, resolved_title = _resolve_cover_inputs(output_dir, title, image_index)
+    cover_paths: list[str] = []
+    if orientation in ("both", "vertical"):
+        cover_paths.append(
+            render_cover(
+                image_path=str(image_path),
+                title=resolved_title,
+                output_path=str(Path(output_dir) / output_name),
+                kicker=kicker,
+                subtitle=subtitle,
+                brand=brand,
+                date_text=date_text,
+            )
+        )
+    if orientation in ("both", "landscape"):
+        landscape_name = f"{Path(output_name).stem}-landscape.png"
+        cover_paths.append(
+            render_cover_landscape(
+                image_path=str(image_path),
+                title=resolved_title,
+                output_path=str(Path(output_dir) / landscape_name),
+                kicker=kicker,
+                subtitle=subtitle,
+                brand=brand,
+                date_text=date_text,
+            )
+        )
+    return cover_paths
 
 
 def generate_cover(

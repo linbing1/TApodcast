@@ -100,8 +100,15 @@ def test_generate_cover_reads_title_and_writes_vertical_png(tmp_path, monkeypatc
     Image.new("RGB", (1200, 800), "#164d75").save(image_dir / "000.jpg")
     Image.new("RGB", (800, 1200), "#875522").save(image_dir / "001.jpg")
     (tmp_path / "title.txt").write_text("枪手签下领袖吉马良斯", encoding="utf-8")
-    (tmp_path / "page.json").write_text(
-        '{"cover_image_index": 1, "cover_image_url": "https://example.com/001.jpg"}',
+    (tmp_path / "images.json").write_text(
+        '{"schema_version": 1, "images": ['
+        '{"local_path": "images/000.jpg", "status": "downloaded"}, '
+        '{"local_path": "images/001.jpg", "status": "downloaded", "is_cover": true}'
+        ']}',
+        encoding="utf-8",
+    )
+    (tmp_path / "cover.json").write_text(
+        '{"schema_version": 1, "image_index": 1, "local_path": "images/001.jpg"}',
         encoding="utf-8",
     )
 
@@ -125,7 +132,12 @@ def test_generate_cover_prefers_shared_title_file(tmp_path, monkeypatch):
     image_dir.mkdir()
     Image.new("RGB", (1200, 800), "#164d75").save(image_dir / "000.jpg")
     (tmp_path / "title.txt").write_text("统一的封面和发布标题", encoding="utf-8")
-    (tmp_path / "publish_title.txt").write_text("旧的发布标题", encoding="utf-8")
+    (tmp_path / "images.json").write_text(
+        '{"schema_version": 1, "images": ['
+        '{"local_path": "images/000.jpg", "status": "downloaded", "is_cover": true}'
+        ']}',
+        encoding="utf-8",
+    )
 
     captured = {}
 
@@ -146,8 +158,15 @@ def test_generate_cover_landscape_writes_horizontal_png(tmp_path, monkeypatch):
     Image.new("RGB", (1200, 800), "#164d75").save(image_dir / "000.jpg")
     Image.new("RGB", (800, 1200), "#875522").save(image_dir / "001.jpg")
     (tmp_path / "title.txt").write_text("枪手签下领袖吉马良斯", encoding="utf-8")
-    (tmp_path / "page.json").write_text(
-        '{"cover_image_index": 1, "cover_image_url": "https://example.com/001.jpg"}',
+    (tmp_path / "images.json").write_text(
+        '{"schema_version": 1, "images": ['
+        '{"local_path": "images/000.jpg", "status": "downloaded"}, '
+        '{"local_path": "images/001.jpg", "status": "downloaded", "is_cover": true}'
+        ']}',
+        encoding="utf-8",
+    )
+    (tmp_path / "cover.json").write_text(
+        '{"schema_version": 1, "image_index": 1, "local_path": "images/001.jpg"}',
         encoding="utf-8",
     )
 
@@ -167,6 +186,12 @@ def test_generate_cover_landscape_uses_same_inputs_as_vertical(tmp_path, monkeyp
     image_dir.mkdir()
     Image.new("RGB", (1200, 800), "#164d75").save(image_dir / "000.jpg")
     (tmp_path / "title.txt").write_text("统一的封面标题", encoding="utf-8")
+    (tmp_path / "images.json").write_text(
+        '{"schema_version": 1, "images": ['
+        '{"local_path": "images/000.jpg", "status": "downloaded", "is_cover": true}'
+        ']}',
+        encoding="utf-8",
+    )
 
     captured = {}
 
@@ -187,6 +212,42 @@ def test_generate_cover_landscape_uses_same_inputs_as_vertical(tmp_path, monkeyp
     assert captured["image_path"] == str(image_dir / "000.jpg")
     assert captured["kicker"] == "英超转会"
     assert captured["output_path"] == str(tmp_path / "wide.png")
+
+
+def test_generate_cover_ignores_stale_images_not_in_manifest(tmp_path, monkeypatch):
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    Image.new("RGB", (1200, 800), "#164d75").save(image_dir / "000.jpg")
+    Image.new("RGB", (1200, 800), "#875522").save(image_dir / "999.jpg")
+    (tmp_path / "title.txt").write_text("封面标题", encoding="utf-8")
+    (tmp_path / "images.json").write_text(
+        '{"schema_version": 1, "images": ['
+        '{"local_path": "images/000.jpg", "status": "downloaded", "is_cover": true}'
+        ']}',
+        encoding="utf-8",
+    )
+
+    captured = {}
+
+    def fake_render_cover(**kwargs):
+        captured.update(kwargs)
+        return kwargs["output_path"]
+
+    monkeypatch.setattr(cover_renderer, "render_cover", fake_render_cover)
+
+    cover_renderer.generate_cover(str(tmp_path))
+
+    assert captured["image_path"] == str(image_dir / "000.jpg")
+
+
+def test_validate_cover_checks_file_and_dimensions(tmp_path):
+    path = tmp_path / "cover.png"
+    Image.new("RGB", (1080, 1920), "black").save(path)
+
+    cover_renderer.validate_cover(str(path), (1080, 1920))
+
+    with __import__("pytest").raises(ValueError, match="Cover size"):
+        cover_renderer.validate_cover(str(path), (1920, 1080))
 
 
 class ImageFontForTest:

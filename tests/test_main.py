@@ -465,11 +465,12 @@ async def test_generate_audio_requires_final_script(mock_get_config, tmp_path):
         await generate_audio(str(output_dir))
 
 
-@patch("src.workflow.generate_cover_landscape")
-@patch("src.workflow.generate_cover")
-def test_run_cover_only_passes_cover_options(mock_generate_cover, mock_generate_landscape, tmp_path):
-    mock_generate_cover.return_value = str(tmp_path / "cover-v1.png")
-    mock_generate_landscape.return_value = str(tmp_path / "cover-v1-landscape.png")
+@patch("src.workflow.generate_covers")
+def test_run_cover_only_passes_cover_options(mock_generate_covers, tmp_path):
+    mock_generate_covers.return_value = [
+        str(tmp_path / "cover-v1.png"),
+        str(tmp_path / "cover-v1-landscape.png"),
+    ]
 
     result = run_cover_only(
         str(tmp_path),
@@ -481,33 +482,33 @@ def test_run_cover_only_passes_cover_options(mock_generate_cover, mock_generate_
     )
 
     assert result == [str(tmp_path / "cover-v1.png"), str(tmp_path / "cover-v1-landscape.png")]
-    mock_generate_cover.assert_called_once_with(
+    mock_generate_covers.assert_called_once_with(
         output_dir=str(tmp_path),
         title="阿森纳签下领袖吉马良斯",
         image_index=6,
         kicker="阿森纳转会 · 深度报道",
         subtitle="一笔重磅转会背后的故事",
         output_name="cover-v1.png",
-    )
-    mock_generate_landscape.assert_called_once_with(
-        output_dir=str(tmp_path),
-        title="阿森纳签下领袖吉马良斯",
-        image_index=6,
-        kicker="阿森纳转会 · 深度报道",
-        subtitle="一笔重磅转会背后的故事",
-        output_name="cover-v1-landscape.png",
+        orientation="both",
     )
 
 
-@patch("src.workflow.generate_cover_landscape")
-@patch("src.workflow.generate_cover")
-def test_run_cover_only_vertical_skips_landscape(mock_generate_cover, mock_generate_landscape, tmp_path):
-    mock_generate_cover.return_value = str(tmp_path / "cover.png")
+@patch("src.workflow.generate_covers")
+def test_run_cover_only_passes_vertical_orientation(mock_generate_covers, tmp_path):
+    mock_generate_covers.return_value = [str(tmp_path / "cover.png")]
 
     result = run_cover_only(str(tmp_path), orientation="vertical")
 
     assert result == [str(tmp_path / "cover.png")]
-    mock_generate_landscape.assert_not_called()
+    mock_generate_covers.assert_called_once_with(
+        output_dir=str(tmp_path),
+        title="",
+        image_index=None,
+        kicker="英超新闻 · 深度报道",
+        subtitle="",
+        output_name="cover.png",
+        orientation="vertical",
+    )
 
 
 @patch("src.workflow.generate_publish_copy")

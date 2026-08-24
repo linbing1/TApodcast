@@ -12,7 +12,7 @@ from src.artifacts import (
     write_artifact,
 )
 from src.config import get_config
-from src.cover_renderer import generate_cover, generate_cover_landscape
+from src.cover_renderer import generate_covers
 from src.doctor import format_doctor_report, run_doctor_checks
 from src.image_captioner import generate_image_captions, load_image_captions
 from src.llm import LLMClient
@@ -92,30 +92,15 @@ def run_cover_only(
     orientation: str = "both",
 ) -> list[str]:
     logger.info("Generating cover from %s...", output_dir)
-    cover_paths: list[str] = []
-    if orientation in ("both", "vertical"):
-        cover_paths.append(
-            generate_cover(
-                output_dir=output_dir,
-                title=title,
-                image_index=image_index,
-                kicker=kicker,
-                subtitle=subtitle,
-                output_name=output_name,
-            )
-        )
-    if orientation in ("both", "landscape"):
-        landscape_name = f"{Path(output_name).stem}-landscape.png"
-        cover_paths.append(
-            generate_cover_landscape(
-                output_dir=output_dir,
-                title=title,
-                image_index=image_index,
-                kicker=kicker,
-                subtitle=subtitle,
-                output_name=landscape_name,
-            )
-        )
+    cover_paths = generate_covers(
+        output_dir=output_dir,
+        title=title,
+        image_index=image_index,
+        kicker=kicker,
+        subtitle=subtitle,
+        output_name=output_name,
+        orientation=orientation,
+    )
     for cover_path in cover_paths:
         logger.info("Done! Cover: %s", cover_path)
     return cover_paths
