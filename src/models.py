@@ -195,5 +195,5 @@ class ImageCaptionManifest(VersionedArtifact):
 class PublishCopy(VersionedArtifact):
     title: str = Field(max_length=30)
     description: str
-    hashtags: list[str] = Field(min_length=3, max_length=6)
+    hashtags: list[str] = Field(min_length=5, max_length=10)
     description_with_hashtags: str

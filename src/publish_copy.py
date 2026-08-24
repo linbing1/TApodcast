@@ -10,12 +10,12 @@ from src.models import PublishCopy
 from src.storage import atomic_write_text
 
 logger = logging.getLogger(__name__)
-PROMPT_VERSION = "publish-copy-v1"
+PROMPT_VERSION = "publish-copy-v2"
 
 TITLE_MAX_LENGTH = 30
 PUBLISH_TEXT_MAX_LENGTH = 1000
-MIN_HASHTAGS = 3
-MAX_HASHTAGS = 6
+MIN_HASHTAGS = 5
+MAX_HASHTAGS = 10
 MAX_HASHTAG_LENGTH = 30
 
 _SYSTEM_PROMPT = """你是一位擅长体育内容运营的抖音编辑，负责为英超新闻视频生成发布文案。
@@ -24,13 +24,15 @@ _SYSTEM_PROMPT = """你是一位擅长体育内容运营的抖音编辑，负责
 {
   "title": "抖音作品标题",
   "description": "作品简介正文",
-  "hashtags": ["英超", "切尔西", "足球新闻"]
+  "hashtags": ["英超", "切尔西", "足球新闻", "英超转会", "球员观察"]
 }
 
 要求：
 - title 必须原样返回输入中的 cover_title，保证抖音作品标题和封面标题完全一致；
 - description 用自然的中文概括视频内容，突出核心事件、人物和看点，控制在80至220字；
-- hashtags 生成3至6个与文章直接相关的话题，只返回话题名称，不要带 #，不要重复，不要编造不存在的球队或人物；
+- hashtags 生成5至10个兼顾相关性和传播覆盖的话题，只返回话题名称，不要带 #，不要重复；
+- 优先包含核心球队、人物或事件，同时可以包含文章明确提到的关联球队、赛事、转会、战术、商业等延伸话题；
+- 可加入“英超”“足球新闻”等宽泛但真实相关的传播标签，不要添加文章完全未涉及的球队、人物或热点；
 - 不要在 JSON 之外输出解释、Markdown 或代码围栏。"""
 
 
@@ -77,7 +79,7 @@ def _normalize_hashtags(value: object) -> list[str]:
 
 def _ensure_minimum_hashtags(hashtags: list[str]) -> list[str]:
     result = list(hashtags)
-    for fallback in ("英超", "足球新闻", "英超每日观察"):
+    for fallback in ("英超", "足球新闻", "足球", "英超每日观察", "体育"):
         if fallback not in result:
             result.append(fallback)
         if len(result) >= MIN_HASHTAGS:
@@ -108,7 +110,14 @@ def _build_source_material(output_dir: Path) -> dict[str, object]:
         "original_title": page.title if page else "",
         "analysis": {
             key: getattr(analysis, key, "")
-            for key in ("title_cn", "overview", "detail", "key_people_and_data", "impact")
+            for key in (
+                "title_cn",
+                "article_type",
+                "overview",
+                "detail",
+                "key_people_and_data",
+                "impact",
+            )
             if analysis and getattr(analysis, key, "")
         },
         "script": script[:12000],
@@ -133,44 +142,94 @@ def _fit_publish_text(description: str, hashtags: list[str]) -> tuple[str, str]:
     return fitted_description, _format_description(fitted_description, hashtags)
 
 
-_TOPIC_ALIASES = (
+_TEAM_ALIASES = (
     (("Arsenal", "阿森纳"), "阿森纳"),
     (("Manchester City", "Man City", "曼城"), "曼城"),
+    (("Bournemouth", "伯恩茅斯"), "伯恩茅斯"),
     (("Manchester United", "Man United", "曼联"), "曼联"),
     (("Liverpool", "利物浦"), "利物浦"),
     (("Chelsea", "切尔西"), "切尔西"),
     (("Tottenham", "Spurs", "热刺"), "热刺"),
+    (("Newcastle United", "Newcastle", "纽卡斯尔", "纽卡"), "纽卡斯尔"),
+    (("Brentford", "布伦特福德"), "布伦特福德"),
+    (("Brighton", "布莱顿"), "布莱顿"),
+    (("Crystal Palace", "水晶宫"), "水晶宫"),
+    (("Everton", "埃弗顿"), "埃弗顿"),
+    (("Fulham", "富勒姆"), "富勒姆"),
+    (("Leeds United", "Leeds", "利兹联"), "利兹联"),
+    (("Nottingham Forest", "诺丁汉森林"), "诺丁汉森林"),
+    (("Sunderland", "桑德兰"), "桑德兰"),
+    (("West Ham United", "West Ham", "西汉姆联"), "西汉姆联"),
+    (("Wolverhampton", "Wolves", "狼队"), "狼队"),
+    (("Burnley", "伯恩利"), "伯恩利"),
+    (("Hull City", "Hull", "赫尔城", "胡尔城"), "赫尔城"),
+    (("Coventry City", "Coventry", "考文垂"), "考文垂"),
     (("Barcelona", "巴塞罗那", "巴萨"), "巴萨"),
     (("Real Madrid", "皇家马德里", "皇马"), "皇马"),
     (("Aston Villa", "阿斯顿维拉", "维拉"), "阿斯顿维拉"),
 )
 
+_DISCOVERY_TOPIC_ALIASES = (
+    (("transfer", "转会", "签下", "加盟", "报价"), "英超转会"),
+    (("tactic", "formation", "pressing", "战术", "阵型", "逼抢", "低位防守"), "英超战术"),
+    (("match", "result", "score", "赛后", "比分", "逆转", "绝杀"), "比赛分析"),
+    (("champions league", "欧冠"), "欧冠"),
+    (("world cup", "世界杯"), "世界杯"),
+    (("ownership", "investment", "takeover", "sale", "股权", "投资", "收购", "出售"), "足球商业"),
+    (("injury", "伤病", "受伤", "复出"), "伤病动态"),
+    (("profile", "wonderkid", "young star", "新星", "妖星", "球员观察"), "球员观察"),
+)
+
+
+def _append_unique(target: list[str], values: list[str]) -> None:
+    for value in values:
+        if value not in target:
+            target.append(value)
+
+
+def _matching_hashtags(text: str, aliases_by_hashtag: tuple) -> list[str]:
+    haystack = text.lower()
+    return [
+        hashtag
+        for aliases, hashtag in aliases_by_hashtag
+        if any(alias.lower() in haystack for alias in aliases)
+    ]
+
 
 def _local_hashtags(material: dict[str, object]) -> list[str]:
     analysis = material.get("analysis")
-    analysis_text = ""
+    primary_analysis_text = ""
+    related_analysis_text = ""
     if isinstance(analysis, dict):
-        analysis_text = " ".join(str(value) for value in analysis.values())
-    haystack = " ".join(
+        primary_analysis_text = " ".join(
+            str(analysis.get(key, ""))
+            for key in ("title_cn", "article_type", "overview")
+        )
+        related_analysis_text = " ".join(
+            str(analysis.get(key, ""))
+            for key in ("detail", "key_people_and_data", "impact")
+        )
+    primary_text = " ".join(
         str(value)
         for value in (
             material.get("cover_title", ""),
             material.get("original_title", ""),
-            analysis_text,
+            primary_analysis_text,
         )
-    ).lower()
+    )
+    related_text = " ".join(
+        str(value)
+        for value in (
+            related_analysis_text,
+            material.get("script", ""),
+        )
+    )
+    full_text = f"{primary_text} {related_text}"
     hashtags: list[str] = []
-    for aliases, hashtag in _TOPIC_ALIASES:
-        if any(alias.lower() in haystack for alias in aliases):
-            hashtags.append(hashtag)
-    if isinstance(analysis, dict):
-        article_type = str(analysis.get("article_type", ""))
-        if "转会" in article_type or "transfer" in haystack:
-            hashtags.append("英超转会")
-        elif "战术" in article_type or "tactic" in haystack:
-            hashtags.append("英超战术")
-        elif "赛后" in article_type or "match" in haystack:
-            hashtags.append("比赛分析")
+    _append_unique(hashtags, _matching_hashtags(primary_text, _TEAM_ALIASES))
+    _append_unique(hashtags, _matching_hashtags(full_text, _DISCOVERY_TOPIC_ALIASES))
+    _append_unique(hashtags, ["英超", "足球新闻"])
+    _append_unique(hashtags, _matching_hashtags(related_text, _TEAM_ALIASES))
     return _ensure_minimum_hashtags(hashtags)
 
 
@@ -218,11 +277,9 @@ def generate_publish_copy(
         raise ValueError("No publish title found in article outputs")
 
     description = _normalize_text(data.get("description")) if llm is not None else _local_description(material)
-    hashtags = (
-        _ensure_minimum_hashtags(_normalize_hashtags(data.get("hashtags")))
-        if llm is not None
-        else _local_hashtags(material)
-    )
+    hashtags = _normalize_hashtags(data.get("hashtags")) if llm is not None else []
+    _append_unique(hashtags, _local_hashtags(material))
+    hashtags = _ensure_minimum_hashtags(hashtags[:MAX_HASHTAGS])
     description, description_with_hashtags = _fit_publish_text(description, hashtags)
     result = PublishCopy(
         title=title,
