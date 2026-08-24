@@ -322,6 +322,13 @@ def write_script_command(
         date_str=_speech_date(),
         target_chars=target_chars,
     )
+    actual_script_chars = count_source_chars(script.text)
+    logger.info(
+        "Generated podcast script (target=%d chars, actual=%d chars, delta=%+d chars)",
+        target_chars,
+        actual_script_chars,
+        actual_script_chars - target_chars,
+    )
     title = analyzed.title_cn.strip()
     if not title:
         raise ValueError("Article analysis did not provide a Chinese title")

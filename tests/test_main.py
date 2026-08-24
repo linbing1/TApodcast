@@ -381,7 +381,8 @@ async def test_generate_audio_runs_audio_assets_only(mock_audio_assets, tmp_path
     mock_audio_assets.assert_awaited_once_with(str(output_dir))
 
 
-def test_write_script_command_writes_final_content(tmp_path):
+def test_write_script_command_writes_final_content(tmp_path, caplog):
+    caplog.set_level("INFO")
     output_dir = tmp_path / "article"
     output_dir.mkdir()
     (output_dir / "analysis.json").write_text("{}", encoding="utf-8")
@@ -407,6 +408,7 @@ def test_write_script_command_writes_final_content(tmp_path):
     assert mock_write.call_args.kwargs["target_chars"] == 800
     assert (output_dir / "title.txt").read_text(encoding="utf-8") == "中文标题"
     assert (output_dir / "script.txt").read_text(encoding="utf-8") == "稿件"
+    assert "target=800 chars, actual=2 chars, delta=-798 chars" in caplog.text
 
 
 @pytest.mark.asyncio
