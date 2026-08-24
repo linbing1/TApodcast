@@ -2,13 +2,13 @@ import asyncio
 import logging
 import os
 import re
-import shutil
 import subprocess
 
 import aiohttp
 import edge_tts
 from edge_tts.exceptions import EdgeTTSException
 
+from src.media import find_ffprobe, probe_media
 from src.models import PodcastScript
 
 logger = logging.getLogger(__name__)
@@ -27,31 +27,17 @@ class TtsOutputTruncatedError(RuntimeError):
     """Edge TTS 流被提前关闭，音频或字幕没有覆盖完整稿件。"""
 
 
-def find_ffprobe() -> str | None:
-    configured = os.environ.get("FFPROBE_BIN")
-    candidates = ((configured,) if configured else ()) + ("ffprobe",)
-    for candidate in candidates:
-        if not candidate:
-            continue
-        resolved = shutil.which(candidate)
-        if resolved:
-            return resolved
-    return None
-
-
 def probe_audio_duration(path: str) -> float | None:
-    ffprobe = find_ffprobe()
-    if not ffprobe:
-        return None
     try:
-        result = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return float(result.stdout.strip())
-    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+        duration = probe_media(path).get("format", {}).get("duration")
+        return float(duration)
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        subprocess.CalledProcessError,
+    ) as exc:
         logger.warning("Could not probe audio duration for %s: %s", path, exc)
         return None
 

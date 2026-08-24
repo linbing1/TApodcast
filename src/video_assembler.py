@@ -1,9 +1,14 @@
 import logging
+import math
 import os
 import shutil
 import subprocess
+import tempfile
+from fractions import Fraction
+from typing import Any
 
 from src.frame_renderer import render_frames
+from src.media import probe_media
 from src.subtitle_renderer import find_cjk_font, write_ass_from_vtt
 
 logger = logging.getLogger(__name__)
@@ -19,18 +24,10 @@ _FFMPEG_CANDIDATES = (
 
 
 def get_audio_duration(mp3_path: str) -> float:
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            mp3_path,
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return float(result.stdout.strip())
+    duration = probe_media(mp3_path).get("format", {}).get("duration")
+    if duration is None:
+        raise ValueError(f"ffprobe did not return an audio duration for {mp3_path}")
+    return float(duration)
 
 
 def _supports_libass(ffmpeg_path: str) -> bool:
@@ -84,6 +81,79 @@ def _ass_filter(ass_path: str, font_path: str | None) -> str:
     return filter_value
 
 
+def _frame_rate(stream: dict[str, Any]) -> float | None:
+    value = stream.get("avg_frame_rate") or stream.get("r_frame_rate")
+    if not value:
+        return None
+    try:
+        return float(Fraction(str(value)))
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def validate_video(path: str) -> None:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Video was not created: {path}")
+    if os.path.getsize(path) == 0:
+        raise ValueError(f"Video is empty: {path}")
+
+    metadata = probe_media(path)
+    streams = metadata.get("streams", [])
+    video_stream = next(
+        (stream for stream in streams if stream.get("codec_type") == "video"),
+        None,
+    )
+    audio_stream = next(
+        (stream for stream in streams if stream.get("codec_type") == "audio"),
+        None,
+    )
+    format_duration = metadata.get("format", {}).get("duration")
+
+    problems: list[str] = []
+    if video_stream is None:
+        problems.append("缺少视频流")
+    else:
+        if video_stream.get("codec_name") != "h264":
+            problems.append(f"视频编码不是 H.264（实际为 {video_stream.get('codec_name')}）")
+        if (
+            video_stream.get("width") != VIDEO_WIDTH
+            or video_stream.get("height") != VIDEO_HEIGHT
+        ):
+            problems.append(
+                "分辨率不是 1080x1920 "
+                f"（实际为 {video_stream.get('width')}x{video_stream.get('height')}）"
+            )
+        frame_rate = _frame_rate(video_stream)
+        if frame_rate is None or not math.isclose(frame_rate, 30.0, abs_tol=0.01):
+            problems.append(f"帧率不是 30fps（实际为 {frame_rate}）")
+
+    if audio_stream is None:
+        problems.append("缺少音频流")
+    elif audio_stream.get("codec_name") != "aac":
+        problems.append(f"音频编码不是 AAC（实际为 {audio_stream.get('codec_name')}）")
+
+    try:
+        duration = float(format_duration)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration <= 0:
+        problems.append(f"视频时长无效（实际为 {format_duration}）")
+
+    if problems:
+        raise ValueError(f"视频校验失败：{'; '.join(problems)}")
+
+
+def _temporary_video_path(output_path: str, output_dir: str) -> str:
+    prefix = f".{os.path.basename(output_path)}."
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=prefix,
+        suffix=".tmp.mp4",
+        dir=output_dir,
+    )
+    os.close(descriptor)
+    return temporary_path
+
+
 def cleanup_frames(output_dir: str) -> bool:
     frames_dir = os.path.join(output_dir, "frames")
     if not os.path.isdir(frames_dir):
@@ -119,15 +189,12 @@ def assemble_video(
         image_paths=image_paths,
         duration=duration,
         per_image=PER_IMAGE_SECONDS,
-        srt_path=srt_path,
-        title="",
-        article_date="",
         output_dir=output_dir,
-        img_top=0,
-        lead_in=0.0,
         image_captions=image_captions,
         font_path=font_path,
     )
+
+    temporary_output_path = _temporary_video_path(output_path, output_dir)
 
     cmd = [
         ffmpeg_path,
@@ -144,15 +211,22 @@ def assemble_video(
         "-b:a", "192k",
         "-c:a", "aac",
         "-t", f"{duration:.3f}",
-        output_path,
+        temporary_output_path,
     ]
 
     logger.info("Running FFmpeg with burned-in ASS subtitles...")
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as error:
-        logger.error("ffmpeg failed:\n%s", error.stderr or "")
-        raise
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as error:
+            logger.error("ffmpeg failed:\n%s", error.stderr or "")
+            raise
+        validate_video(temporary_output_path)
+        os.replace(temporary_output_path, output_path)
+    finally:
+        if os.path.exists(temporary_output_path):
+            os.remove(temporary_output_path)
+
     cleanup_frames(output_dir)
     logger.info("Video saved to %s", output_path)
     return output_path

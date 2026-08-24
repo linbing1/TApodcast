@@ -207,12 +207,7 @@ def render_frames(
     image_paths: list[str],
     duration: float,
     per_image: float,
-    srt_path: str,
-    title: str,
-    article_date: str,
     output_dir: str,
-    img_top: int = 600,
-    lead_in: float = 0.0,
     image_captions: list[str] | None = None,
     font_path: str | None = None,
 ) -> tuple[str, int]:
@@ -222,7 +217,6 @@ def render_frames(
     image captions use a fixed layout based on each image's initial bounds;
     the image itself can continue moving underneath the caption.
     """
-    del srt_path, title, article_date, img_top, lead_in
     n = len(image_paths)
     if n == 0:
         raise ValueError("At least one image is required to render frames")

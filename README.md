@@ -130,7 +130,7 @@ extract
 | `analyze-content` | 用 LLM 提炼适合新闻视频的中文上下文 | `analysis.json` |
 | `write-script` | 用 LLM 直接生成有新闻钩子的中文标题和最终口播稿 | `title.txt`、`script.txt` |
 | `generate-audio` | 本地整理图片图注，并生成 TTS 音频和时间字幕；不调用 LLM | `image_captions.json`、`audio.mp3`、`audio.vtt` |
-| `video` | 合成图片轮播、口播音频和字幕 | `subtitles.ass`、`<中文标题>.mp4` |
+| `video` | 按 `images.json` 中的成功下载顺序合成图片轮播、口播音频和字幕，并校验最终媒体参数 | `subtitles.ass`、`<中文标题>.mp4` |
 | `cover` | 生成竖版和横版封面 | `cover.png`、`cover-landscape.png` |
 | `publish-copy` | 本地生成抖音标题、简介和传播导向标签，不调用 LLM | `publish.json`、`publish_title.txt`、`publish_description.txt` |
 
@@ -147,6 +147,8 @@ target_chars = clamp(round(source_chars × 0.04 + 400), 500, 1000)
 发布文案包含 5 至 10 个标签。标签以核心球队和主题为主，也可包含原文明确关联的球队以及真实相关的英超、足球新闻、转会、比赛或战术话题，以提升发现性；不添加文章无关的人物、球队或热点。
 
 `generate-audio` 不再调用 DeepSeek：图片已有中文说明时直接保留，没有中文说明时保留原始说明并将中文图注留空；音频和字幕由 Edge TTS 本地流程生成。TTS 只对网络、服务端和疑似截断错误重试，且每次尝试先写入临时文件，校验成功后再替换正式的 `audio.mp3` 和 `audio.vtt`，避免失败尝试覆盖已有可用产物。
+
+`video` 只使用 `images.json` 中 `status=downloaded` 且文件实际存在的图片，并保持 manifest 顺序；不会扫描 `images/` 目录中的历史遗留图片。FFmpeg 先写入同目录临时 MP4，随后用 `ffprobe` 检查文件非空、时长大于零、分辨率为 `1080×1920`、帧率为 `30fps`，并包含 H.264 视频流和 AAC 音频流；校验通过后才原子替换正式视频。失败时会删除临时 MP4、保留已有正式视频，并保留 `frames/` 供排查。
 
 ## 命令
 
@@ -192,6 +194,8 @@ playwright install chromium
 | `TTS_RATE` | 否 | 默认 `+10%` |
 | `CJK_FONT_PATH` | 否 | 字幕和封面使用的中文字体文件 |
 | `COVER_DATE_FONT_PATH` | 否 | 封面日期字体 |
+| `FFMPEG_BIN` | 否 | 指定支持 libass 的 FFmpeg 可执行文件 |
+| `FFPROBE_BIN` | 否 | 指定与 FFmpeg 配套的 ffprobe 可执行文件 |
 
 配置只从进程环境变量读取，不会自动加载 `.env`。脚本、定时任务和 CI 需要自行显式注入所需变量。
 

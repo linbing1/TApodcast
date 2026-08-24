@@ -173,6 +173,7 @@ def _build_pipeline_runner(context: PipelineContext) -> PipelineRunner:
             action=_pipeline_video,
             inputs=_static_paths(
                 "images",
+                "images.json",
                 "image_captions.json",
                 "title.txt",
                 "audio.mp3",

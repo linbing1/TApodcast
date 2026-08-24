@@ -1,4 +1,3 @@
-import glob
 import logging
 import os
 from collections.abc import Callable
@@ -6,7 +5,12 @@ from datetime import date
 from pathlib import Path
 
 from src.analyzer import analyze_article
-from src.artifacts import load_analyzed_article, load_page_content, write_artifact
+from src.artifacts import (
+    load_analyzed_article,
+    load_image_manifest,
+    load_page_content,
+    write_artifact,
+)
 from src.config import get_config
 from src.cover_renderer import generate_cover, generate_cover_landscape
 from src.doctor import format_doctor_report, run_doctor_checks
@@ -33,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 
 def run_video_only(output_dir: str, title: str = "") -> None:
-    images_dir = os.path.join(output_dir, "images")
     mp3_path = os.path.join(output_dir, "audio.mp3")
     srt_path = os.path.join(output_dir, "audio.vtt")
 
@@ -42,9 +45,25 @@ def run_video_only(output_dir: str, title: str = "") -> None:
         if os.path.exists(title_file):
             title = Path(title_file).read_text(encoding="utf-8").strip()
 
-    image_paths = sorted(glob.glob(os.path.join(images_dir, "*.jpg")))
+    image_manifest_path = Path(output_dir) / "images.json"
+    if not image_manifest_path.exists():
+        raise FileNotFoundError(f"Image manifest not found: {image_manifest_path}")
+
+    image_manifest = load_image_manifest(image_manifest_path)
+    image_paths = []
+    for record in image_manifest.images:
+        if record.status != "downloaded" or not record.local_path:
+            continue
+        local_path = Path(record.local_path)
+        image_path = local_path if local_path.is_absolute() else Path(output_dir) / local_path
+        if image_path.is_file():
+            image_paths.append(str(image_path))
+        else:
+            logger.warning("Skipping missing downloaded image: %s", image_path)
     if not image_paths:
-        raise FileNotFoundError(f"No images found in {images_dir}")
+        raise FileNotFoundError(
+            f"No usable downloaded images listed in: {image_manifest_path}"
+        )
     if not os.path.exists(mp3_path):
         raise FileNotFoundError(f"Audio not found: {mp3_path}")
     if not os.path.exists(srt_path):

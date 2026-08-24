@@ -28,11 +28,7 @@ def test_render_frames_creates_numbered_jpegs_without_text_overlay(tmp_path):
         image_paths=[str(image_path)],
         duration=0.4,
         per_image=1.0,
-        srt_path=str(tmp_path / "audio.vtt"),
-        title="Title",
-        article_date="2026-08-11",
         output_dir=str(tmp_path),
-        img_top=600,
     )
 
     frame_paths = sorted((tmp_path / "frames").glob("*.jpg"))
@@ -125,9 +121,6 @@ def test_render_frames_keeps_caption_mapped_to_each_image(monkeypatch, tmp_path)
         image_paths=image_paths,
         duration=2.0,
         per_image=1.0,
-        srt_path=str(tmp_path / "audio.vtt"),
-        title="",
-        article_date="",
         output_dir=str(tmp_path),
         image_captions=["第一张图注", "第二张图注"],
     )

@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     vid.add_argument(
         "--dir",
         required=True,
-        help="Output directory containing images/, audio.mp3, audio.vtt",
+        help="Output directory containing images.json, audio.mp3, and audio.vtt",
     )
     vid.add_argument(
         "--title",
