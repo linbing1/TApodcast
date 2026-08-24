@@ -31,11 +31,17 @@ OUT="output/$(date +%F)/$SLUG"
 
 ### 标准执行
 
-先检查环境；本地检查出现 `FAIL` 时先修复环境再处理文章。
+首次配置、依赖变更或环境异常时，先检查本地环境；本地检查出现 `FAIL` 时先修复环境再处理文章。日常处理同一环境下的文章时，不需要重复执行在线检查。
 
 ```bash
+# 首次配置或环境变化时执行
 git status --short --branch
 .venv/bin/python main.py doctor
+```
+
+遇到网络、Cookie 或 LLM/TTS 连接问题时，再按需执行在线检查。在线检查会产生额外网络请求，其中 LLM 检查会消耗少量 API token，不属于文章处理流程：
+
+```bash
 .venv/bin/python main.py doctor --online --url "$URL"
 ```
 
@@ -119,7 +125,7 @@ extract
 
 | 阶段 | 作用 | 主要产物 |
 |------|------|----------|
-| `extract` | 提取正文、图片、视频清单 | `page.json`、`text.txt`、`images.json`、`videos.json` |
+| `extract` | 提取正文、图片和视频元数据 | `page.json`、`text.txt`、`videos.json` |
 | `download-images` | 下载文章图片并确定封面主图 | `images/`、`images.json`、`cover.json` |
 | `analyze-content` | 用 LLM 提炼适合新闻视频的中文上下文 | `analysis.json` |
 | `write-script` | 用 LLM 直接生成有新闻钩子的中文标题和最终口播稿 | `title.txt`、`script.txt` |
@@ -186,6 +192,75 @@ playwright install chromium
 | `COVER_DATE_FONT_PATH` | 否 | 封面日期字体 |
 
 配置只从进程环境变量读取，不会自动加载 `.env`。脚本、定时任务和 CI 需要自行显式注入所需变量。
+
+### 安全配置
+
+不要把真实的 `LLM_API_KEY`、`ATHLETIC_COOKIES`、Cookie JSON、`.env` 文件或字体路径写入仓库、脚本、输出目录或提交记录。它们应通过当前进程环境、本机受保护的配置位置、系统钥匙串、CI/CD Secret 或服务器的 Secret 管理功能注入。下面的临时输入方式不会写入本地文件；如果使用 `~/.zshrc` 持久化配置，必须把它视为本机私密配置，不能提交或上传。
+
+非敏感参数可以直接在当前终端设置：
+
+```bash
+export LLM_BASE_URL="https://api.deepseek.com/v1"
+export LLM_MODEL="deepseek-v4-flash"
+export LLM_MAX_REQUESTS_PER_ARTICLE="12"
+export TTS_VOICE="zh-CN-YunjianNeural"
+export TTS_RATE="+10%"
+```
+
+敏感参数建议临时输入到当前终端，不要写入文件或命令历史：
+
+```bash
+printf "LLM_API_KEY: "
+read -r -s LLM_API_KEY
+printf "\nATHLETIC_COOKIES: "
+read -r -s ATHLETIC_COOKIES
+printf "\n"
+export LLM_API_KEY ATHLETIC_COOKIES
+```
+
+如果本机已经在 `~/.zshrc` 中配置并导出了这两个变量，直接执行下面的命令即可加载；项目不会直接读取 `~/.zshrc`，而是读取当前进程环境：
+
+```bash
+source ~/.zshrc
+.venv/bin/python main.py doctor
+```
+
+`~/.zshrc` 只是本机的配置位置，不是跨机器的固定约定。上传到服务器或交给 CI 运行时，服务器不会自动拥有本机的 `~/.zshrc`；应在服务器的 Secret 管理功能中注入同名环境变量，不要上传这个文件或其中的真实内容。
+
+`ATHLETIC_COOKIES` 的配置步骤：
+
+1. 在浏览器中登录 The Athletic，并打开 Cookie-Editor。
+2. 导出当前站点的 Cookie JSON 数组；不要把导出的内容保存到仓库或上传到 Git。
+3. 将完整 JSON 数组粘贴到上面的隐藏输入中。它必须是非空数组，每个有效条目至少包含 `name` 和 `value`。
+
+服务器或 CI 环境应使用平台提供的 Secret 变量注入同名环境变量，不要上传包含真实配置的文件。上传代码前可执行 `git diff --check` 和 `git status --short`，确认没有暂存敏感文件。
+
+### doctor 检查与修复
+
+首次配置、依赖变更或环境异常时执行：
+
+```bash
+.venv/bin/python main.py doctor
+```
+
+| 检查 | 配置或修复方式 |
+|------|----------------|
+| Python | `python --version` 应为 3.12 或更高版本。 |
+| Athletic Cookie | 按上面的 Cookie-Editor 流程注入 `ATHLETIC_COOKIES`；Cookie 失效时重新导出。 |
+| LLM | 注入 `LLM_API_KEY`；可选调整 `LLM_BASE_URL`、`LLM_MODEL` 和 `LLM_MAX_REQUESTS_PER_ARTICLE`。 |
+| TTS | `TTS_RATE` 使用 `+10%`、`-20%` 这类格式；`TTS_VOICE` 必须是 Edge TTS 可用的声音名称。 |
+| 输出目录 | 目标目录或其已有父目录必须可写；剩余空间少于 512 MB 会失败，少于 2 GB 会警告。 |
+| Playwright Chromium | 执行 `.venv/bin/python -m playwright install chromium`。 |
+| FFmpeg/libass | 安装带 libass 的 FFmpeg；macOS 可执行 `brew install ffmpeg-full`，其他系统使用对应发行版的 FFmpeg 包。 |
+| 中文字体 | 优先自动寻找系统字体；找不到时安装 CJK 字体，或只在当前进程设置 `CJK_FONT_PATH`。封面日期字体可通过 `COVER_DATE_FONT_PATH` 覆盖。 |
+
+`doctor` 出现 `FAIL` 时先按表格修复，再重新执行。只有排查网络、Cookie 或 LLM/TTS 连接问题时，才执行：
+
+```bash
+.venv/bin/python main.py doctor --online --url "$URL"
+```
+
+在线检查会产生额外网络请求，LLM 连通性检查还会消耗少量 API token，不属于文章处理流程。
 
 ## 输出目录
 

@@ -59,11 +59,42 @@ async def test_extract_writes_separate_content_outputs(
 
     assert result == str(output_dir)
     assert (output_dir / "text.txt").read_text(encoding="utf-8") == "Arsenal won the match."
-    assert json.loads((output_dir / "images.json").read_text(encoding="utf-8"))["images"][0]["alt"] == "Team"
     assert json.loads((output_dir / "videos.json").read_text(encoding="utf-8"))["videos"][0]["kind"] == "iframe"
+    assert not (output_dir / "images.json").exists()
     page = json.loads((output_dir / "page.json").read_text(encoding="utf-8"))
     assert page["title"] == "Arsenal Win"
+    assert page["images"][0]["alt"] == "Team"
     mock_extract.assert_awaited_once_with("https://example.com/article", [])
+
+
+@pytest.mark.asyncio
+@patch("src.workflow.get_config")
+@patch("src.workflow.extract_page_content", new_callable=AsyncMock)
+async def test_extract_rejects_missing_title(mock_extract, mock_get_config, tmp_path):
+    mock_get_config.return_value = {"athletic_cookies": []}
+    mock_extract.return_value = PageContent(
+        url="https://example.com/article",
+        title="",
+        main_text="Some article text",
+    )
+
+    with pytest.raises(ValueError, match="No article title found"):
+        await extract("https://example.com/article", str(tmp_path))
+
+
+@pytest.mark.asyncio
+@patch("src.workflow.get_config")
+@patch("src.workflow.extract_page_content", new_callable=AsyncMock)
+async def test_extract_rejects_missing_text(mock_extract, mock_get_config, tmp_path):
+    mock_get_config.return_value = {"athletic_cookies": []}
+    mock_extract.return_value = PageContent(
+        url="https://example.com/article",
+        title="Article title",
+        main_text="",
+    )
+
+    with pytest.raises(ValueError, match="No article text found"):
+        await extract("https://example.com/article", str(tmp_path))
 
 
 @pytest.mark.asyncio

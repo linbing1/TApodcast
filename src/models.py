@@ -68,8 +68,6 @@ class ScrapedArticle(StrictModel):
     title: str
     link: str
     full_text: str
-    image_paths: list[str] = Field(default_factory=list)
-    cover_image_path: str | None = None
 
 
 class AnalyzedArticle(VersionedArtifact):

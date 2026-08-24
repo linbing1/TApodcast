@@ -12,14 +12,11 @@ import httpx
 from PIL import Image as PILImage
 from playwright.async_api import Page, async_playwright
 
-from src.artifacts import write_artifact
 from src.models import (
-    CoverManifest,
     ImageAsset,
     ImageManifest,
     ImageRecord,
     PageContent,
-    ScrapedArticle,
     VideoAsset,
 )
 
@@ -694,57 +691,3 @@ async def download_images(
     downloaded = sum(record["status"] == "downloaded" for record in records)
     logger.info("Downloaded %d/%d images to %s", downloaded, len(records), images_dir)
     return records
-
-
-async def scrape_article(url: str, cookies: list[dict], output_dir: str) -> ScrapedArticle:
-    content = await extract_page_content(url, cookies)
-    title = content.title
-    full_text = content.main_text
-
-    if not content.images:
-        raise ValueError(f"No images found in article: {url}")
-
-    records = await download_images(
-        content.images,
-        output_dir,
-        referer=url,
-        cookies=cookies,
-        cover_image_index=content.cover_image_index,
-    )
-    write_artifact(
-        os.path.join(output_dir, "images.json"),
-        ImageManifest(images=[ImageRecord.model_validate(record) for record in records]),
-    )
-    image_paths = [
-        os.path.join(output_dir, record["local_path"])
-        for record in records
-        if record["status"] == "downloaded"
-    ]
-
-    if not image_paths:
-        raise ValueError(f"Failed to download any images for: {url}")
-
-    cover_image_path = None
-    if content.cover_image_index is not None and content.cover_image_index < len(records):
-        cover_record = records[content.cover_image_index]
-        if cover_record["status"] == "downloaded":
-            cover_image_path = os.path.join(output_dir, cover_record["local_path"])
-    write_artifact(
-        os.path.join(output_dir, "cover.json"),
-        CoverManifest(
-            image_index=content.cover_image_index,
-            image_url=content.cover_image_url,
-            local_path=(
-                os.path.relpath(cover_image_path, output_dir)
-                if cover_image_path else None
-            ),
-        ),
-    )
-
-    return ScrapedArticle(
-        title=title,
-        link=url,
-        full_text=full_text,
-        image_paths=image_paths,
-        cover_image_path=cover_image_path,
-    )

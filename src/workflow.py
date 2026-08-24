@@ -136,18 +136,25 @@ async def extract(url: str, output_dir: str = "") -> str:
     config = get_config()
     if not output_dir:
         output_dir = default_output_dir(url)
-    os.makedirs(output_dir, exist_ok=True)
     logger.info("Extracting page content: %s", url)
 
     content = await extract_page_content(url, config["athletic_cookies"])
+    title = content.title.strip()
+    main_text = content.main_text.strip()
+    if not title:
+        raise ValueError(f"No article title found: {url}")
+    if not main_text:
+        raise ValueError(f"No article text found: {url}")
+    if len(main_text) < 300:
+        logger.warning(
+            "Extracted article text is unusually short (%d chars): %s",
+            len(main_text),
+            url,
+        )
+
+    os.makedirs(output_dir, exist_ok=True)
     write_artifact(os.path.join(output_dir, "page.json"), content)
-    atomic_write_text(os.path.join(output_dir, "text.txt"), content.main_text)
-    write_artifact(
-        os.path.join(output_dir, "images.json"),
-        ImageManifest(
-            images=[ImageRecord(**image.model_dump()) for image in content.images]
-        ),
-    )
+    atomic_write_text(os.path.join(output_dir, "text.txt"), main_text)
     write_artifact(
         os.path.join(output_dir, "videos.json"),
         VideoManifest(videos=content.videos),

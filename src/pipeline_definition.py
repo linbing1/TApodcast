@@ -135,7 +135,6 @@ def _build_pipeline_runner(context: PipelineContext) -> PipelineRunner:
             outputs=_static_paths(
                 "page.json",
                 "text.txt",
-                "images.json",
                 "videos.json",
             ),
         ),
@@ -217,6 +216,33 @@ def _article_url_from_output(output_dir: str) -> str:
     return load_page_content(page_path).url
 
 
+def _build_pipeline_context(
+    article_url: str,
+    output_dir: str,
+    *,
+    video_title: str = "",
+    cover_title: str = "",
+    cover_image_index: int | None = None,
+    cover_kicker: str = "英超新闻 · 深度报道",
+    cover_subtitle: str = "",
+    cover_output_name: str = "cover.png",
+    cover_orientation: str = "both",
+) -> PipelineContext:
+    return PipelineContext(
+        article_url=article_url,
+        output_dir=output_dir,
+        video_title=video_title,
+        cover_title=cover_title,
+        cover_image_index=cover_image_index,
+        cover_kicker=cover_kicker,
+        cover_subtitle=cover_subtitle,
+        cover_output_name=cover_output_name,
+        cover_orientation=cover_orientation,
+        configuration=_pipeline_configuration(),
+        prompt_versions=_prompt_versions(),
+    )
+
+
 async def run(
     url: str,
     skip_video: bool = False,
@@ -237,12 +263,7 @@ async def run(
             raise ValueError("--skip-video cannot be combined with --to video")
         to_step = to_step or "generate-audio"
 
-    context = PipelineContext(
-        article_url=url,
-        output_dir=output_dir,
-        configuration=_pipeline_configuration(),
-        prompt_versions=_prompt_versions(),
-    )
+    context = _build_pipeline_context(url, output_dir)
     runner = _build_pipeline_runner(context)
     await runner.run(
         resume=resume,
@@ -277,9 +298,9 @@ async def run_pipeline_step(
             raise ValueError("The extract step requires an article URL")
         output_dir = output_dir or default_output_dir(article_url)
     resolved_url = article_url or _article_url_from_output(output_dir)
-    context = PipelineContext(
-        article_url=resolved_url,
-        output_dir=output_dir,
+    context = _build_pipeline_context(
+        resolved_url,
+        output_dir,
         video_title=video_title,
         cover_title=cover_title,
         cover_image_index=cover_image_index,
@@ -287,8 +308,6 @@ async def run_pipeline_step(
         cover_subtitle=cover_subtitle,
         cover_output_name=cover_output_name,
         cover_orientation=cover_orientation,
-        configuration=_pipeline_configuration(),
-        prompt_versions=_prompt_versions(),
     )
     runner = _build_pipeline_runner(context)
     await runner.run(

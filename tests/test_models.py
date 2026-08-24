@@ -1,17 +1,15 @@
-from src.models import ScrapedArticle, AnalyzedArticle, PodcastScript
+from src.models import AnalyzedArticle, PodcastScript, ScrapedArticle
 
 
-class TestScrapedArticle:
-    def test_defaults(self):
-        a = ScrapedArticle(title="Arsenal", link="https://example.com", full_text="text")
-        assert a.image_paths == []
+def test_scraped_article_contains_source_text():
+    article = ScrapedArticle(
+        title="Arsenal",
+        link="https://example.com",
+        full_text="text",
+    )
 
-    def test_with_images(self):
-        a = ScrapedArticle(
-            title="Arsenal", link="https://example.com",
-            full_text="text", image_paths=["/tmp/img1.jpg", "/tmp/img2.jpg"]
-        )
-        assert len(a.image_paths) == 2
+    assert article.title == "Arsenal"
+    assert article.full_text == "text"
 
 
 class TestAnalyzedArticle:
