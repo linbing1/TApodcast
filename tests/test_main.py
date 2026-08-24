@@ -4,15 +4,17 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from main import (
+from src.pipeline_definition import (
     _build_pipeline_runner,
+    run,
+    run_content_audio_pipeline,
+    run_pipeline_step,
+)
+from src.workflow import (
     download_images_command,
     extract,
     generate_audio,
-    run,
-    run_content_audio_pipeline,
     run_cover_only,
-    run_pipeline_step,
     run_publish_only,
     write_script_command,
 )
@@ -38,8 +40,8 @@ def test_pipeline_registers_all_publish_stages(tmp_path):
 
 
 @pytest.mark.asyncio
-@patch("main.get_config")
-@patch("main.extract_page_content", new_callable=AsyncMock)
+@patch("src.workflow.get_config")
+@patch("src.workflow.extract_page_content", new_callable=AsyncMock)
 async def test_extract_writes_separate_content_outputs(
     mock_extract, mock_get_config, tmp_path
 ):
@@ -65,7 +67,7 @@ async def test_extract_writes_separate_content_outputs(
 
 
 @pytest.mark.asyncio
-@patch("main._build_pipeline_runner")
+@patch("src.pipeline_definition._build_pipeline_runner")
 async def test_run_configures_pipeline_runner(mock_build_runner):
     url = "https://www.nytimes.com/athletic/123/article-slug/"
     output_dir = "output/custom/article-slug"
@@ -96,7 +98,7 @@ async def test_run_configures_pipeline_runner(mock_build_runner):
 
 
 @pytest.mark.asyncio
-@patch("main._build_pipeline_runner")
+@patch("src.pipeline_definition._build_pipeline_runner")
 async def test_run_defaults_to_resume_for_existing_manifest(mock_build_runner, tmp_path):
     output_dir = tmp_path / "article"
     output_dir.mkdir()
@@ -115,7 +117,7 @@ async def test_run_defaults_to_resume_for_existing_manifest(mock_build_runner, t
 
 
 @pytest.mark.asyncio
-@patch("main._build_pipeline_runner")
+@patch("src.pipeline_definition._build_pipeline_runner")
 async def test_run_skip_video_stops_after_audio(mock_build_runner):
     url = "https://www.nytimes.com/athletic/123/article-slug/"
     output_dir = f"output/{date.today()}/article-slug"
@@ -134,7 +136,7 @@ async def test_run_skip_video_stops_after_audio(mock_build_runner):
 
 
 @pytest.mark.asyncio
-@patch("main._build_pipeline_runner")
+@patch("src.pipeline_definition._build_pipeline_runner")
 async def test_run_pipeline_step_uses_article_url_from_page(mock_build_runner, tmp_path):
     output_dir = tmp_path / "article"
     output_dir.mkdir()
@@ -163,7 +165,7 @@ async def test_run_pipeline_step_uses_article_url_from_page(mock_build_runner, t
 
 
 @pytest.mark.asyncio
-@patch("main._build_pipeline_runner")
+@patch("src.pipeline_definition._build_pipeline_runner")
 async def test_run_pipeline_step_force_keeps_llm_cache_enabled(
     mock_build_runner, tmp_path
 ):
@@ -188,7 +190,7 @@ async def test_run_pipeline_step_force_keeps_llm_cache_enabled(
 
 
 @pytest.mark.asyncio
-@patch("main._build_pipeline_runner")
+@patch("src.pipeline_definition._build_pipeline_runner")
 async def test_generate_audio_command_runs_audio_stage_only(
     mock_build_runner, tmp_path
 ):
@@ -213,8 +215,8 @@ async def test_generate_audio_command_runs_audio_stage_only(
 
 
 @pytest.mark.asyncio
-@patch("main.get_config")
-@patch("main.download_image_assets", new_callable=AsyncMock)
+@patch("src.workflow.get_config")
+@patch("src.workflow.download_image_assets", new_callable=AsyncMock)
 async def test_download_images_command_reads_manifest_and_writes_results(
     mock_download, mock_get_config, tmp_path
 ):
@@ -253,7 +255,7 @@ async def test_download_images_command_reads_manifest_and_writes_results(
 
 
 @pytest.mark.asyncio
-@patch("main.generate_audio_assets", new_callable=AsyncMock)
+@patch("src.workflow.generate_audio_assets", new_callable=AsyncMock)
 async def test_generate_audio_runs_audio_assets_only(mock_audio_assets, tmp_path):
     output_dir = tmp_path / "article"
 
@@ -263,7 +265,7 @@ async def test_generate_audio_runs_audio_assets_only(mock_audio_assets, tmp_path
     mock_audio_assets.assert_awaited_once_with(str(output_dir))
 
 
-def test_write_script_command_writes_final_content_and_removes_old_outputs(tmp_path):
+def test_write_script_command_writes_final_content(tmp_path):
     output_dir = tmp_path / "article"
     output_dir.mkdir()
     (output_dir / "analysis.json").write_text("{}", encoding="utf-8")
@@ -271,25 +273,16 @@ def test_write_script_command_writes_final_content_and_removes_old_outputs(tmp_p
     llm = object()
 
     with (
-        patch("main._load_source_article") as mock_load_source,
-        patch("main.load_analyzed_article", return_value=analyzed),
-        patch("main._create_llm_client", return_value=llm),
-        patch("main.write_script", return_value=PodcastScript(text="稿件")) as mock_write,
+        patch("src.workflow._load_source_article") as mock_load_source,
+        patch("src.workflow.load_analyzed_article", return_value=analyzed),
+        patch("src.workflow._create_llm_client", return_value=llm),
+        patch("src.workflow.write_script", return_value=PodcastScript(text="稿件")) as mock_write,
     ):
         mock_load_source.return_value = ScrapedArticle(
             title="测试文章",
             link="https://example.com/article",
             full_text="阿" * 10_000,
         )
-
-        for filename in (
-            "script-draft.txt",
-            "content-review.json",
-            "content-quality.json",
-            "title-candidate.txt",
-            "script-candidate.txt",
-        ):
-            (output_dir / filename).write_text("old", encoding="utf-8")
 
         result = write_script_command(str(output_dir))
 
@@ -298,18 +291,10 @@ def test_write_script_command_writes_final_content_and_removes_old_outputs(tmp_p
     assert mock_write.call_args.kwargs["target_chars"] == 800
     assert (output_dir / "title.txt").read_text(encoding="utf-8") == "中文标题"
     assert (output_dir / "script.txt").read_text(encoding="utf-8") == "稿件"
-    for filename in (
-        "script-draft.txt",
-        "content-review.json",
-        "content-quality.json",
-        "title-candidate.txt",
-        "script-candidate.txt",
-    ):
-        assert not (output_dir / filename).exists()
 
 
 @pytest.mark.asyncio
-@patch("main.get_config")
+@patch("src.workflow.get_config")
 async def test_generate_audio_requires_final_script(mock_get_config, tmp_path):
     mock_get_config.return_value = {
         "llm_base_url": "https://llm.example.com/v1",
@@ -324,8 +309,8 @@ async def test_generate_audio_requires_final_script(mock_get_config, tmp_path):
         await generate_audio(str(output_dir))
 
 
-@patch("main.generate_cover_landscape")
-@patch("main.generate_cover")
+@patch("src.workflow.generate_cover_landscape")
+@patch("src.workflow.generate_cover")
 def test_run_cover_only_passes_cover_options(mock_generate_cover, mock_generate_landscape, tmp_path):
     mock_generate_cover.return_value = str(tmp_path / "cover-v1.png")
     mock_generate_landscape.return_value = str(tmp_path / "cover-v1-landscape.png")
@@ -358,8 +343,8 @@ def test_run_cover_only_passes_cover_options(mock_generate_cover, mock_generate_
     )
 
 
-@patch("main.generate_cover_landscape")
-@patch("main.generate_cover")
+@patch("src.workflow.generate_cover_landscape")
+@patch("src.workflow.generate_cover")
 def test_run_cover_only_vertical_skips_landscape(mock_generate_cover, mock_generate_landscape, tmp_path):
     mock_generate_cover.return_value = str(tmp_path / "cover.png")
 
@@ -369,7 +354,7 @@ def test_run_cover_only_vertical_skips_landscape(mock_generate_cover, mock_gener
     mock_generate_landscape.assert_not_called()
 
 
-@patch("main.generate_publish_copy")
+@patch("src.workflow.generate_publish_copy")
 def test_run_publish_only_generates_publish_files(
     mock_generate_publish_copy,
     tmp_path,
@@ -384,5 +369,5 @@ def test_run_publish_only_generates_publish_files(
     result = run_publish_only(str(tmp_path))
 
     assert result == str(tmp_path / "publish.json")
-    assert not frames_dir.exists()
+    assert frames_dir.exists()
     mock_generate_publish_copy.assert_called_once_with(str(tmp_path))

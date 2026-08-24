@@ -1,80 +1,26 @@
-import json
 import logging
 import re
 from pathlib import Path
 
 from src.artifacts import load_analyzed_article, load_page_content, write_artifact
-from src.llm import LLMClient
-from src.llm_json import loads as loads_llm_json
 from src.models import PublishCopy
 from src.storage import atomic_write_text
 
 logger = logging.getLogger(__name__)
-PROMPT_VERSION = "publish-copy-v2"
 
 TITLE_MAX_LENGTH = 30
 PUBLISH_TEXT_MAX_LENGTH = 1000
 MIN_HASHTAGS = 5
 MAX_HASHTAGS = 10
-MAX_HASHTAG_LENGTH = 30
-
-_SYSTEM_PROMPT = """你是一位擅长体育内容运营的抖音编辑，负责为英超新闻视频生成发布文案。
-
-请根据文章分析和中文口播稿，返回严格的 JSON 对象：
-{
-  "title": "抖音作品标题",
-  "description": "作品简介正文",
-  "hashtags": ["英超", "切尔西", "足球新闻", "英超转会", "球员观察"]
-}
-
-要求：
-- title 必须原样返回输入中的 cover_title，保证抖音作品标题和封面标题完全一致；
-- description 用自然的中文概括视频内容，突出核心事件、人物和看点，控制在80至220字；
-- hashtags 生成5至10个兼顾相关性和传播覆盖的话题，只返回话题名称，不要带 #，不要重复；
-- 优先包含核心球队、人物或事件，同时可以包含文章明确提到的关联球队、赛事、转会、战术、商业等延伸话题；
-- 可加入“英超”“足球新闻”等宽泛但真实相关的传播标签，不要添加文章完全未涉及的球队、人物或热点；
-- 不要在 JSON 之外输出解释、Markdown 或代码围栏。"""
-
 
 def _normalize_text(value: object) -> str:
     return " ".join(str(value or "").split()).strip()
-
-
-def _parse_response(response: str) -> dict[str, object]:
-    try:
-        data = loads_llm_json(response)
-    except json.JSONDecodeError as error:
-        raise ValueError(f"Failed to parse publish copy response: {response[:200]}") from error
-    if not isinstance(data, dict):
-        raise ValueError("Publish copy response must be a JSON object")
-    return data
 
 
 def _normalize_title(value: object) -> str:
     title = _normalize_text(value).strip("\"'“”‘’")
     title = title.replace("#", "")
     return title[:TITLE_MAX_LENGTH]
-
-
-def _normalize_hashtags(value: object) -> list[str]:
-    if isinstance(value, str):
-        candidates = value.replace("，", ",").split(",")
-    elif isinstance(value, list):
-        candidates = value
-    else:
-        candidates = []
-
-    hashtags: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        tag = _normalize_text(candidate).lstrip("#").strip("，,。.!！？、")
-        if not tag or tag in seen:
-            continue
-        seen.add(tag)
-        hashtags.append(tag[:MAX_HASHTAG_LENGTH])
-        if len(hashtags) >= MAX_HASHTAGS:
-            break
-    return hashtags
 
 
 def _ensure_minimum_hashtags(hashtags: list[str]) -> list[str]:
@@ -247,39 +193,24 @@ def _local_description(material: dict[str, object]) -> str:
 
 def generate_publish_copy(
     output_dir: str,
-    llm: LLMClient | None = None,
 ) -> dict[str, object]:
-    """Generate Douyin title, description, and hashtags for an article output."""
+    """Generate Douyin publish copy locally from existing article outputs."""
     directory = Path(output_dir)
     material = _build_source_material(directory)
-    data: dict[str, object] = {}
-    if llm is not None:
-        response = llm.complete(
-            _SYSTEM_PROMPT,
-            json.dumps(material, ensure_ascii=False),
-            json_mode=True,
-            stage="publish-copy",
-            prompt_version=PROMPT_VERSION,
-        )
-        data = _parse_response(response)
 
     title = _normalize_title(material.get("cover_title"))
     if not title:
         analysis = material.get("analysis")
         analysis_title = analysis.get("title_cn") if isinstance(analysis, dict) else ""
         title = _normalize_title(
-            data.get("title")
-            or data.get("publish_title")
-            or analysis_title
+            analysis_title
             or material.get("original_title")
         )
     if not title:
         raise ValueError("No publish title found in article outputs")
 
-    description = _normalize_text(data.get("description")) if llm is not None else _local_description(material)
-    hashtags = _normalize_hashtags(data.get("hashtags")) if llm is not None else []
-    _append_unique(hashtags, _local_hashtags(material))
-    hashtags = _ensure_minimum_hashtags(hashtags[:MAX_HASHTAGS])
+    description = _local_description(material)
+    hashtags = _local_hashtags(material)
     description, description_with_hashtags = _fit_publish_text(description, hashtags)
     result = PublishCopy(
         title=title,

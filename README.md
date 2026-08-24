@@ -126,7 +126,7 @@ extract
 | `generate-audio` | 生成图片中文图注、TTS 音频和时间字幕 | `image_captions.json`、`audio.mp3`、`audio.vtt` |
 | `video` | 合成图片轮播、口播音频和字幕 | `subtitles.ass`、`<中文标题>.mp4` |
 | `cover` | 生成竖版和横版封面 | `cover.png`、`cover-landscape.png` |
-| `publish-copy` | 生成抖音标题、简介和传播导向标签 | `publish.json`、`publish_title.txt`、`publish_description.txt` |
+| `publish-copy` | 本地生成抖音标题、简介和传播导向标签，不调用 LLM | `publish.json`、`publish_title.txt`、`publish_description.txt` |
 
 `write-script` 的目标长度随清洗后的原文长度线性变化：
 

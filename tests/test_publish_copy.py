@@ -3,16 +3,6 @@ import json
 from src.publish_copy import generate_publish_copy
 
 
-class StubLLM:
-    def __init__(self, response: dict):
-        self.response = response
-        self.calls = []
-
-    def complete(self, system, user, json_mode=False, **kwargs):
-        self.calls.append((system, user, json_mode))
-        return json.dumps(self.response, ensure_ascii=False)
-
-
 def _write_article_outputs(tmp_path, title="利物浦为何吸引超级富豪入股"):
     (tmp_path / "title.txt").write_text(title, encoding="utf-8")
     (tmp_path / "page.json").write_text(
@@ -38,22 +28,14 @@ def _write_article_outputs(tmp_path, title="利物浦为何吸引超级富豪入
     )
 
 
-def test_generate_publish_copy_reuses_cover_title_and_writes_outputs(tmp_path):
+def test_generate_publish_copy_writes_local_outputs(tmp_path):
     cover_title = "利物浦为何吸引超级富豪入股"
     _write_article_outputs(tmp_path, cover_title)
-    llm = StubLLM({
-        "title": "LLM不应覆盖封面标题",
-        "description": "芬威体育集团考虑引入少数股权投资者，利物浦为何受到超级富豪关注？本期梳理潜在投资者、交易方式以及对俱乐部控制权的影响。",
-        "hashtags": ["#英超", "利物浦", "足球商业", "英超"],
-    })
 
-    result = generate_publish_copy(str(tmp_path), llm)
+    result = generate_publish_copy(str(tmp_path))
 
     assert result["title"] == cover_title
-    assert result["hashtags"] == ["英超", "利物浦", "足球商业", "足球新闻", "足球"]
-    assert result["description_with_hashtags"].endswith(
-        "#英超 #利物浦 #足球商业 #足球新闻 #足球"
-    )
+    assert result["hashtags"] == ["利物浦", "足球商业", "英超", "足球新闻", "足球"]
     assert (tmp_path / "title.txt").read_text(encoding="utf-8") == cover_title
     assert (tmp_path / "publish_title.txt").read_text(encoding="utf-8") == cover_title
     assert (tmp_path / "publish_description.txt").read_text(
@@ -62,20 +44,6 @@ def test_generate_publish_copy_reuses_cover_title_and_writes_outputs(tmp_path):
     saved = json.loads((tmp_path / "publish.json").read_text(encoding="utf-8"))
     assert saved["schema_version"] == 1
     assert {key: value for key, value in saved.items() if key != "schema_version"} == result
-
-    request = json.loads(llm.calls[0][1])
-    assert request["cover_title"] == cover_title
-    assert llm.calls[0][2] is True
-
-
-def test_generate_publish_copy_defaults_to_local_generation(tmp_path):
-    _write_article_outputs(tmp_path)
-
-    result = generate_publish_copy(str(tmp_path))
-
-    assert result["title"] == "利物浦为何吸引超级富豪入股"
-    assert result["description"] == "利物浦正在评估少数股权投资。"
-    assert result["hashtags"] == ["利物浦", "足球商业", "英超", "足球新闻", "足球"]
 
 
 def test_local_hashtags_include_related_teams_for_discovery(tmp_path):
@@ -150,43 +118,18 @@ def test_local_hashtags_add_broad_topics_and_secondary_clubs(tmp_path):
 
 
 def test_generate_publish_copy_limits_title_and_total_description(tmp_path):
-    _write_article_outputs(tmp_path, "这是一个超过三十个字符而且需要被严格截断的中文封面标题用于测试一致性")
-    llm = StubLLM({
-        "title": "unused",
-        "description": "简介" * 600,
-        "hashtags": ["英超", "切尔西", "足球新闻"],
-    })
+    _write_article_outputs(
+        tmp_path,
+        "这是一个超过三十个字符而且需要被严格截断的中文封面标题用于测试一致性",
+    )
+    analysis = json.loads((tmp_path / "analysis.json").read_text(encoding="utf-8"))
+    analysis["overview"] = "简介" * 600
+    (tmp_path / "analysis.json").write_text(
+        json.dumps(analysis, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
-    result = generate_publish_copy(str(tmp_path), llm)
+    result = generate_publish_copy(str(tmp_path))
 
     assert len(result["title"]) == 30
     assert len(result["description_with_hashtags"]) <= 1000
-    assert result["description_with_hashtags"].endswith(
-        "#英超 #切尔西 #足球新闻 #利物浦 #足球商业 #足球"
-    )
-
-
-def test_generate_publish_copy_fills_missing_hashtags(tmp_path):
-    _write_article_outputs(tmp_path)
-    llm = StubLLM({
-        "title": "unused",
-        "description": "作品简介",
-        "hashtags": ["英超", "利物浦"],
-    })
-
-    result = generate_publish_copy(str(tmp_path), llm)
-
-    assert result["hashtags"] == ["英超", "利物浦", "足球商业", "足球新闻", "足球"]
-
-
-def test_generate_publish_copy_limits_hashtags_to_ten(tmp_path):
-    _write_article_outputs(tmp_path)
-    llm = StubLLM({
-        "title": "unused",
-        "description": "作品简介",
-        "hashtags": [f"话题{index}" for index in range(12)],
-    })
-
-    result = generate_publish_copy(str(tmp_path), llm)
-
-    assert result["hashtags"] == [f"话题{index}" for index in range(10)]
