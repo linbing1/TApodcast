@@ -22,6 +22,7 @@ class TestGetConfig:
         with patch.dict("os.environ", env, clear=True):
             config = get_config()
         assert config["llm_model"] == "deepseek-v4-flash"
+        assert config["llm_max_requests"] == 12
         assert config["tts_voice"] == "zh-CN-YunjianNeural"
         assert config["tts_rate"] == "+10%"
 
