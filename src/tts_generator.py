@@ -5,7 +5,9 @@ import re
 import shutil
 import subprocess
 
+import aiohttp
 import edge_tts
+from edge_tts.exceptions import EdgeTTSException
 
 from src.models import PodcastScript
 
@@ -17,6 +19,8 @@ _CUE_TIMING_RE = re.compile(
 # Edge TTS 的词时间轴允许略微超出实际音频结尾，留出容差避免误报。
 _TRUNCATION_TOLERANCE_SECONDS = 0.5
 _SCRIPT_TAIL_CHARS = 6
+_MAX_TTS_ATTEMPTS = 3
+_TTS_RETRY_DELAY_SECONDS = 5
 
 
 class TtsOutputTruncatedError(RuntimeError):
@@ -84,16 +88,44 @@ def validate_tts_output(script_text: str, srt_text: str, audio_duration: float |
             )
 
 
+def _is_retryable_tts_error(error: Exception) -> bool:
+    return isinstance(
+        error,
+        (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            ConnectionError,
+            EdgeTTSException,
+            TtsOutputTruncatedError,
+        ),
+    )
+
+
+def _temporary_output_paths(output_dir: str, attempt: int) -> tuple[str, str]:
+    prefix = f".{os.getpid()}.{attempt}"
+    return (
+        os.path.join(output_dir, f"audio.mp3{prefix}.tmp"),
+        os.path.join(output_dir, f"audio.vtt{prefix}.tmp"),
+    )
+
+
 async def generate_tts(script: PodcastScript, voice: str, output_dir: str, rate: str = "+0%") -> tuple[str, str]:
     mp3_path = os.path.join(output_dir, "audio.mp3")
     srt_path = os.path.join(output_dir, "audio.vtt")
+    logger.info(
+        "Generating TTS (script=%d chars, voice=%s, rate=%s)",
+        len(script.text),
+        voice,
+        rate,
+    )
 
-    for attempt in range(1, 4):
+    for attempt in range(1, _MAX_TTS_ATTEMPTS + 1):
+        temporary_mp3_path, temporary_srt_path = _temporary_output_paths(output_dir, attempt)
         try:
             communicate = edge_tts.Communicate(script.text, voice, rate=rate)
             submaker = edge_tts.SubMaker()
 
-            with open(mp3_path, "wb") as mp3_file:
+            with open(temporary_mp3_path, "wb") as mp3_file:
                 async for chunk in communicate.stream():
                     if chunk["type"] == "audio":
                         mp3_file.write(chunk["data"])
@@ -101,18 +133,44 @@ async def generate_tts(script: PodcastScript, voice: str, output_dir: str, rate:
                         submaker.feed(chunk)
 
             srt_content = submaker.get_srt()
-            with open(srt_path, "w", encoding="utf-8") as srt_file:
+            with open(temporary_srt_path, "w", encoding="utf-8") as srt_file:
                 srt_file.write(srt_content)
 
-            audio_duration = probe_audio_duration(mp3_path)
+            audio_duration = probe_audio_duration(temporary_mp3_path)
             if audio_duration is None:
-                logger.warning("ffprobe 不可用，跳过 TTS 音频时长校验: %s", mp3_path)
+                logger.warning(
+                    "ffprobe 不可用，跳过 TTS 音频时长校验: %s",
+                    temporary_mp3_path,
+                )
             validate_tts_output(script.text, srt_content, audio_duration)
 
-            logger.info("Generated audio: %s, subtitles: %s", mp3_path, srt_path)
+            os.replace(temporary_mp3_path, mp3_path)
+            os.replace(temporary_srt_path, srt_path)
+            subtitle_end = _last_cue_end_seconds(srt_content)
+            logger.info(
+                "Generated audio (attempt=%d, duration=%s, subtitles_end=%s, audio_bytes=%d): %s; subtitles: %s",
+                attempt,
+                f"{audio_duration:.2f}s" if audio_duration is not None else "unknown",
+                f"{subtitle_end:.2f}s" if subtitle_end is not None else "unknown",
+                os.path.getsize(mp3_path),
+                mp3_path,
+                srt_path,
+            )
             return mp3_path, srt_path
-        except Exception as e:
-            if attempt == 3:
+        except Exception as error:
+            if not _is_retryable_tts_error(error) or attempt == _MAX_TTS_ATTEMPTS:
                 raise
-            logger.warning("TTS failed (attempt %d/3): %s. Retrying in 5s...", attempt, e)
-            await asyncio.sleep(5)
+            logger.warning(
+                "Retryable TTS failure (attempt %d/%d): %s. Retrying in %ds...",
+                attempt,
+                _MAX_TTS_ATTEMPTS,
+                error,
+                _TTS_RETRY_DELAY_SECONDS,
+            )
+            await asyncio.sleep(_TTS_RETRY_DELAY_SECONDS)
+        finally:
+            for temporary_path in (temporary_mp3_path, temporary_srt_path):
+                try:
+                    os.remove(temporary_path)
+                except FileNotFoundError:
+                    pass

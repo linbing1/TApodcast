@@ -14,6 +14,7 @@ from src.workflow import (
     download_images_command,
     extract,
     generate_audio,
+    generate_audio_assets,
     run_cover_only,
     run_publish_only,
     write_script_command,
@@ -379,6 +380,43 @@ async def test_generate_audio_runs_audio_assets_only(mock_audio_assets, tmp_path
 
     assert result == str(output_dir)
     mock_audio_assets.assert_awaited_once_with(str(output_dir))
+
+
+@pytest.mark.asyncio
+@patch("src.workflow._create_llm_client")
+@patch("src.workflow.generate_tts", new_callable=AsyncMock)
+@patch("src.workflow.generate_image_captions")
+@patch("src.workflow.get_config")
+async def test_generate_audio_assets_does_not_create_llm_client(
+    mock_get_config,
+    mock_generate_captions,
+    mock_generate_tts,
+    mock_create_llm,
+    tmp_path,
+):
+    mock_get_config.return_value = {
+        "tts_voice": "zh-CN-YunjianNeural",
+        "tts_rate": "+10%",
+    }
+    output_dir = tmp_path / "article"
+    output_dir.mkdir()
+    (output_dir / "script.txt").write_text("测试口播稿", encoding="utf-8")
+    mock_generate_tts.return_value = (
+        str(output_dir / "audio.mp3"),
+        str(output_dir / "audio.vtt"),
+    )
+
+    result = await generate_audio_assets(str(output_dir))
+
+    assert result == str(output_dir)
+    mock_create_llm.assert_not_called()
+    mock_generate_captions.assert_called_once_with(str(output_dir))
+    mock_generate_tts.assert_awaited_once()
+    assert mock_generate_tts.call_args.args[1:] == (
+        "zh-CN-YunjianNeural",
+        str(output_dir),
+        "+10%",
+    )
 
 
 def test_write_script_command_writes_final_content(tmp_path, caplog):

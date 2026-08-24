@@ -37,6 +37,7 @@ class TestGenerateTTS:
         assert os.path.exists(srt_path)
         assert open(mp3_path, "rb").read() == b"fake-audio-data"
         assert "今天" in open(srt_path).read()
+        assert not list(tmp_path.glob("*.tmp"))
         mock_submaker.feed.assert_called_once()
         mock_submaker.get_srt.assert_called_once_with()
 
@@ -92,6 +93,79 @@ class TestGenerateTTS:
         assert mock_sleep.await_count == 2
         assert open(srt_path).read() == complete
         assert os.path.exists(mp3_path)
+        assert not list(tmp_path.glob("*.tmp"))
+
+    @pytest.mark.asyncio
+    @patch("src.tts_generator.asyncio.sleep")
+    @patch("src.tts_generator.edge_tts.Communicate")
+    async def test_does_not_retry_non_retryable_local_error(
+        self, mock_communicate_cls, mock_sleep, tmp_path
+    ):
+        old_audio = tmp_path / "audio.mp3"
+        old_subtitles = tmp_path / "audio.vtt"
+        old_audio.write_bytes(b"old-audio")
+        old_subtitles.write_text("old-subtitles", encoding="utf-8")
+        mock_communicate_cls.side_effect = ValueError("invalid voice")
+
+        with pytest.raises(ValueError, match="invalid voice"):
+            await generate_tts(
+                PodcastScript(text="内容"),
+                "invalid",
+                str(tmp_path),
+            )
+
+        assert old_audio.read_bytes() == b"old-audio"
+        assert old_subtitles.read_text(encoding="utf-8") == "old-subtitles"
+        mock_communicate_cls.assert_called_once_with("内容", "invalid", rate="+0%")
+        mock_sleep.assert_not_awaited()
+        assert not list(tmp_path.glob("*.tmp"))
+
+    @pytest.mark.asyncio
+    @patch("src.tts_generator.probe_audio_duration", return_value=152.4)
+    @patch("src.tts_generator.asyncio.sleep")
+    @patch("src.tts_generator.edge_tts.SubMaker")
+    @patch("src.tts_generator.edge_tts.Communicate")
+    async def test_preserves_existing_outputs_until_retry_succeeds(
+        self,
+        mock_communicate_cls,
+        mock_submaker_cls,
+        mock_sleep,
+        mock_probe,
+        tmp_path,
+    ):
+        old_audio = tmp_path / "audio.mp3"
+        old_subtitles = tmp_path / "audio.vtt"
+        old_audio.write_bytes(b"old-audio")
+        old_subtitles.write_text("old-subtitles", encoding="utf-8")
+
+        mock_communicate = MagicMock()
+        mock_communicate_cls.return_value = mock_communicate
+        mock_communicate.stream.side_effect = lambda: _fake_stream([
+            {"type": "audio", "data": b"new-audio"},
+            {"type": "WordBoundary", "offset": 0, "duration": 1000, "text": "今天"},
+        ])
+        mock_submaker = MagicMock()
+        mock_submaker_cls.return_value = mock_submaker
+        truncated = (
+            "1\n00:00:00,000 --> 00:00:01,000\n今天\n"
+            "2\n00:00:01,000 --> 00:02:37,988\n结尾\n"
+        )
+        complete = (
+            "1\n00:00:00,000 --> 00:00:01,000\n今天\n"
+            "2\n00:00:01,000 --> 00:00:08,000\n"
+            "感谢收听，更多内容请关注英超每日观察。\n"
+        )
+        mock_submaker.get_srt.side_effect = [truncated, complete]
+        script = PodcastScript(
+            text="今天。感谢收听，更多内容请关注英超每日观察。"
+        )
+
+        await generate_tts(script, "zh-CN-XiaoxiaoNeural", str(tmp_path))
+
+        assert old_audio.read_bytes() == b"new-audio"
+        assert old_subtitles.read_text(encoding="utf-8") == complete
+        assert mock_sleep.await_count == 1
+        assert not list(tmp_path.glob("*.tmp"))
 
 
 class TestValidateTtsOutput:
