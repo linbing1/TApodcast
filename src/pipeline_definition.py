@@ -4,6 +4,7 @@ from pathlib import Path
 from src.analyzer import PROMPT_VERSION as ANALYZER_PROMPT_VERSION
 from src.artifacts import load_page_content
 from src.config import get_llm_max_requests
+from src.image_captioner import PROMPT_VERSION as IMAGE_CAPTION_PROMPT_VERSION
 from src.paths import default_output_dir, safe_title
 from src.pipeline import PipelineContext, PipelineRunner, PipelineStep
 from src.script_writer import PROMPT_VERSION as SCRIPT_PROMPT_VERSION
@@ -63,7 +64,11 @@ def _pipeline_write_script(context: PipelineContext) -> None:
 
 
 async def _pipeline_generate_audio(context: PipelineContext) -> None:
-    await generate_audio_assets(context.output_dir)
+    await generate_audio_assets(
+        context.output_dir,
+        cache_enabled=context.llm_cache_enabled,
+        usage_callback=context.llm_usage_callback,
+    )
 
 
 def _pipeline_video(context: PipelineContext) -> None:
@@ -116,6 +121,7 @@ def _pipeline_configuration() -> dict[str, str]:
 def _prompt_versions() -> dict[str, str]:
     return {
         "analyzer": ANALYZER_PROMPT_VERSION,
+        "image_captioner": IMAGE_CAPTION_PROMPT_VERSION,
         "script_writer": SCRIPT_PROMPT_VERSION,
     }
 
@@ -164,9 +170,12 @@ def _build_pipeline_runner(context: PipelineContext) -> PipelineRunner:
                 "audio.vtt",
             ),
             configuration_keys=(
+                "llm_base_url",
+                "llm_model",
                 "tts_voice",
                 "tts_rate",
             ),
+            prompt_keys=("image_captioner",),
         ),
         PipelineStep(
             name="video",

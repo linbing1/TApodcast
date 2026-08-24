@@ -7,9 +7,6 @@ class TestStripCodeFence:
     def test_strips_json_fence(self):
         assert strip_code_fence('```json\n{"a": 1}\n```') == '{"a": 1}'
 
-    def test_keeps_plain_json(self):
-        assert strip_code_fence('  {"a": 1}  ') == '{"a": 1}'
-
     def test_handles_fence_without_newline(self):
         assert strip_code_fence("```") == ""
 

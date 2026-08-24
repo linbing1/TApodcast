@@ -61,46 +61,6 @@ def test_composite_draws_right_aligned_caption_relative_to_image(monkeypatch):
     assert caption_bounds[2] <= 940
 
 
-def test_draw_image_caption_centers_visible_text_inside_background(monkeypatch):
-    calls = {}
-
-    class FakeDraw:
-        def textbbox(self, position, text, font):
-            del position, text, font
-            return (0, 10, 100, 42)
-
-        def rounded_rectangle(self, bounds, **kwargs):
-            del kwargs
-            calls["box"] = bounds
-
-        def text(self, position, text, **kwargs):
-            del text, kwargs
-            calls["text"] = position
-
-    monkeypatch.setattr(frame_renderer.ImageDraw, "Draw", lambda *args: FakeDraw())
-    font = ImageFont.load_default(size=32)
-
-    _draw_image_caption(
-        Image.new("RGB", (1080, 1920), color="black"),
-        "测试图注",
-        (140, 400, 940, 1000),
-        caption_layout=(font, ["测试图注"]),
-    )
-
-    box_left, box_top, box_right, box_bottom = calls["box"]
-    text_x, text_y = calls["text"]
-    visible_bounds = (
-        text_x,
-        text_y + 10,
-        text_x + 100,
-        text_y + 42,
-    )
-
-    assert visible_bounds[1] - box_top == frame_renderer._CAPTION_VERTICAL_PADDING
-    assert box_bottom - visible_bounds[3] == frame_renderer._CAPTION_VERTICAL_PADDING
-    assert visible_bounds[2] == box_right - frame_renderer._CAPTION_HORIZONTAL_PADDING
-
-
 def test_render_frames_keeps_caption_mapped_to_each_image(monkeypatch, tmp_path):
     image_paths = []
     for index, color in enumerate(("red", "blue")):

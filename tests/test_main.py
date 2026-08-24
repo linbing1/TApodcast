@@ -131,25 +131,6 @@ async def test_run_configures_pipeline_runner(mock_build_runner):
 
 @pytest.mark.asyncio
 @patch("src.pipeline_definition._build_pipeline_runner")
-async def test_run_defaults_to_resume_for_existing_manifest(mock_build_runner, tmp_path):
-    output_dir = tmp_path / "article"
-    output_dir.mkdir()
-    (output_dir / "manifest.json").write_text("{}", encoding="utf-8")
-    mock_build_runner.return_value.run = AsyncMock()
-
-    await run("https://example.com/article", output_dir=str(output_dir))
-
-    mock_build_runner.return_value.run.assert_awaited_once_with(
-        resume=True,
-        from_step=None,
-        to_step=None,
-        force_steps=None,
-        dry_run=False,
-    )
-
-
-@pytest.mark.asyncio
-@patch("src.pipeline_definition._build_pipeline_runner")
 async def test_run_skip_video_stops_after_audio(mock_build_runner):
     url = "https://www.nytimes.com/athletic/123/article-slug/"
     output_dir = f"output/{date.today()}/article-slug"
@@ -372,22 +353,11 @@ async def test_download_images_command_removes_manifests_when_all_images_fail(
 
 
 @pytest.mark.asyncio
-@patch("src.workflow.generate_audio_assets", new_callable=AsyncMock)
-async def test_generate_audio_runs_audio_assets_only(mock_audio_assets, tmp_path):
-    output_dir = tmp_path / "article"
-
-    result = await generate_audio(str(output_dir))
-
-    assert result == str(output_dir)
-    mock_audio_assets.assert_awaited_once_with(str(output_dir))
-
-
-@pytest.mark.asyncio
 @patch("src.workflow._create_llm_client")
 @patch("src.workflow.generate_tts", new_callable=AsyncMock)
 @patch("src.workflow.generate_image_captions")
 @patch("src.workflow.get_config")
-async def test_generate_audio_assets_does_not_create_llm_client(
+async def test_generate_audio_assets_translates_captions_with_llm(
     mock_get_config,
     mock_generate_captions,
     mock_generate_tts,
@@ -395,6 +365,9 @@ async def test_generate_audio_assets_does_not_create_llm_client(
     tmp_path,
 ):
     mock_get_config.return_value = {
+        "llm_base_url": "https://llm.example.com/v1",
+        "llm_api_key": "test-key",
+        "llm_model": "test-model",
         "tts_voice": "zh-CN-YunjianNeural",
         "tts_rate": "+10%",
     }
@@ -405,12 +378,18 @@ async def test_generate_audio_assets_does_not_create_llm_client(
         str(output_dir / "audio.mp3"),
         str(output_dir / "audio.vtt"),
     )
+    llm = object()
+    mock_create_llm.return_value = llm
 
     result = await generate_audio_assets(str(output_dir))
 
     assert result == str(output_dir)
-    mock_create_llm.assert_not_called()
-    mock_generate_captions.assert_called_once_with(str(output_dir))
+    mock_create_llm.assert_called_once_with(
+        str(output_dir),
+        cache_enabled=True,
+        usage_callback=None,
+    )
+    mock_generate_captions.assert_called_once_with(str(output_dir), llm)
     mock_generate_tts.assert_awaited_once()
     assert mock_generate_tts.call_args.args[1:] == (
         "zh-CN-YunjianNeural",

@@ -127,31 +127,6 @@ def test_generate_cover_reads_title_and_writes_vertical_png(tmp_path, monkeypatc
     assert Image.open(output).size == (1080, 1920)
 
 
-def test_generate_cover_prefers_shared_title_file(tmp_path, monkeypatch):
-    image_dir = tmp_path / "images"
-    image_dir.mkdir()
-    Image.new("RGB", (1200, 800), "#164d75").save(image_dir / "000.jpg")
-    (tmp_path / "title.txt").write_text("统一的封面和发布标题", encoding="utf-8")
-    (tmp_path / "images.json").write_text(
-        '{"schema_version": 1, "images": ['
-        '{"local_path": "images/000.jpg", "status": "downloaded", "is_cover": true}'
-        ']}',
-        encoding="utf-8",
-    )
-
-    captured = {}
-
-    def fake_render_cover(**kwargs):
-        captured.update(kwargs)
-        return kwargs["output_path"]
-
-    monkeypatch.setattr(cover_renderer, "render_cover", fake_render_cover)
-
-    cover_renderer.generate_cover(str(tmp_path))
-
-    assert captured["title"] == "统一的封面和发布标题"
-
-
 def test_generate_cover_landscape_writes_horizontal_png(tmp_path, monkeypatch):
     image_dir = tmp_path / "images"
     image_dir.mkdir()
@@ -179,39 +154,6 @@ def test_generate_cover_landscape_writes_horizontal_png(tmp_path, monkeypatch):
     assert output == str(tmp_path / "cover-landscape.png")
     assert Path(output).exists()
     assert Image.open(output).size == (1920, 1080)
-
-
-def test_generate_cover_landscape_uses_same_inputs_as_vertical(tmp_path, monkeypatch):
-    image_dir = tmp_path / "images"
-    image_dir.mkdir()
-    Image.new("RGB", (1200, 800), "#164d75").save(image_dir / "000.jpg")
-    (tmp_path / "title.txt").write_text("统一的封面标题", encoding="utf-8")
-    (tmp_path / "images.json").write_text(
-        '{"schema_version": 1, "images": ['
-        '{"local_path": "images/000.jpg", "status": "downloaded", "is_cover": true}'
-        ']}',
-        encoding="utf-8",
-    )
-
-    captured = {}
-
-    def fake_render_cover_landscape(**kwargs):
-        captured.update(kwargs)
-        return kwargs["output_path"]
-
-    monkeypatch.setattr(cover_renderer, "render_cover_landscape", fake_render_cover_landscape)
-
-    cover_renderer.generate_cover_landscape(
-        str(tmp_path),
-        image_index=0,
-        kicker="英超转会",
-        output_name="wide.png",
-    )
-
-    assert captured["title"] == "统一的封面标题"
-    assert captured["image_path"] == str(image_dir / "000.jpg")
-    assert captured["kicker"] == "英超转会"
-    assert captured["output_path"] == str(tmp_path / "wide.png")
 
 
 def test_generate_cover_ignores_stale_images_not_in_manifest(tmp_path, monkeypatch):

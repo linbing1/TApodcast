@@ -351,14 +351,23 @@ def write_script_command(
 
 async def generate_audio_assets(
     output_dir: str,
+    *,
+    cache_enabled: bool = True,
+    usage_callback: Callable[[], None] | None = None,
 ) -> str:
     config = get_config()
     script_path = Path(output_dir) / "script.txt"
     if not script_path.exists():
         raise FileNotFoundError(f"Final podcast script not found: {script_path}")
     script = PodcastScript(text=script_path.read_text(encoding="utf-8").strip())
-    logger.info("Preparing local image captions without LLM...")
-    generate_image_captions(output_dir)
+    llm = _create_llm_client(
+        output_dir,
+        cache_enabled=cache_enabled,
+        usage_callback=usage_callback,
+    )
+
+    logger.info("Translating and shortening image captions with LLM...")
+    generate_image_captions(output_dir, llm)
 
     logger.info("Generating audio with edge-tts...")
     mp3_path, vtt_path = await generate_tts(

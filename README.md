@@ -197,7 +197,7 @@ extract
 | `download-images` | 根据 `page.json` 下载图片，并确定封面候选 | `images/`、`images.json`、`cover.json` | 否 |
 | `analyze-content` | 从原文提炼适合短新闻视频的中文上下文 | `analysis.json` | 是 |
 | `write-script` | 根据原文和分析一次性生成吸引人的中文标题与最终口播稿 | `title.txt`、`script.txt` | 是 |
-| `generate-audio` | 整理本地图注，使用 Edge TTS 生成音频和时间字幕 | `image_captions.json`、`audio.mp3`、`audio.vtt` | 否 |
+| `generate-audio` | 用 LLM 翻译并精简图片图注，再使用 Edge TTS 生成音频和时间字幕 | `image_captions.json`、`audio.mp3`、`audio.vtt` | 是 |
 | `video` | 按成功下载顺序合成图片、音频和字幕，并校验媒体参数 | `subtitles.ass`、`<安全标题>.mp4` | 否 |
 | `cover` | 使用已下载图片生成竖版和横版封面，并校验尺寸 | `cover.png`、`cover-landscape.png` | 否 |
 | `publish-copy` | 根据标题、口播和分析本地生成抖音发布文案与标签 | `publish.json`、`publish_title.txt`、`publish_description.txt` | 否 |
@@ -218,8 +218,8 @@ target_chars = clamp(round(source_chars × 0.04 + 400), 500, 1000)
 
 ### 阶段实现约束
 
-- `analyze-content` 和 `write-script` 是唯一的文章处理 LLM 阶段。
-- `generate-audio` 不调用 DeepSeek；已有中文图注直接保留，没有中文图注时不额外翻译。
+- `analyze-content`、`write-script` 和 `generate-audio` 是文章处理中的 LLM 阶段；`generate-audio` 通常为整篇文章的图片图注发起一次翻译请求。
+- `generate-audio` 会保留已有中文图注，并将英文图片说明批量交给 LLM 翻译和精简；输入和提示词不变时复用 `.llm-cache/`，缓存命中不计入 API 请求预算。
 - `video` 只使用 `images.json` 中 `status=downloaded` 且文件实际存在的图片，不扫描 `images/` 中的历史遗留文件。
 - `video` 写入临时 MP4，随后用 `ffprobe` 检查时长、分辨率、帧率、H.264 视频流和 AAC 音频流；校验通过后才替换正式文件。
 - `cover` 写入临时 PNG，校验非空、格式和尺寸后才替换正式文件。竖版为 `1080×1920`，横版为 `1920×1080`。
@@ -227,7 +227,7 @@ target_chars = clamp(round(source_chars × 0.04 + 400), 500, 1000)
 
 ## LLM 调用和预算
 
-每篇文章的实际 LLM API 请求预算由 `LLM_MAX_REQUESTS_PER_ARTICLE` 控制，默认 `12`。缓存命中不计入预算；网络重试会记录在对应请求的尝试次数中。预算使用情况会持续写入：
+每篇文章的实际 LLM API 请求预算由 `LLM_MAX_REQUESTS_PER_ARTICLE` 控制，默认 `12`。正常情况下，`analyze-content`、`write-script` 和 `generate-audio` 各最多产生一次未命中缓存的请求；缓存命中不计入预算，网络重试会记录在对应请求的尝试次数中。预算使用情况会持续写入：
 
 - `llm-usage.jsonl`：逐次记录 API 请求、缓存命中、Token 和错误；
 - `manifest.json`：记录累计 API 请求、缓存命中、Prompt/Completion/Total Token、剩余预算和按阶段汇总。

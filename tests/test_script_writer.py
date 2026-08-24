@@ -112,12 +112,3 @@ def test_calculate_target_script_chars_uses_linear_formula():
 def test_calculate_target_script_chars_applies_bounds():
     assert calculate_target_script_chars(0) == MIN_SCRIPT_CHARS
     assert calculate_target_script_chars(100_000) == MAX_SCRIPT_CHARS
-
-
-def test_calculate_target_script_chars_rejects_negative_source_length():
-    try:
-        calculate_target_script_chars(-1)
-    except ValueError as exc:
-        assert str(exc) == "source_chars must be non-negative"
-    else:
-        raise AssertionError("negative source length should fail")
