@@ -31,6 +31,7 @@ from src.scraper import download_images as download_image_assets
 from src.scraper import extract_page_content
 from src.storage import atomic_write_text
 from src.tts_generator import generate_tts
+from src.verifier import format_verify_report, verify_output_dir
 from src.video_assembler import assemble_video, cleanup_frames
 
 logger = logging.getLogger(__name__)
@@ -120,6 +121,12 @@ def run_cleanup_only(output_dir: str) -> None:
         logger.info("Done! Frames directory removed.")
     else:
         logger.info("No frames directory found, nothing to clean.")
+
+
+def run_verify_only(output_dir: str) -> bool:
+    report = verify_output_dir(output_dir)
+    print(format_verify_report(report))
+    return report.passed
 
 
 async def run_doctor(

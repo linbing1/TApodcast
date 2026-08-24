@@ -2,7 +2,7 @@ import logging
 import re
 from pathlib import Path
 
-from src.artifacts import load_analyzed_article, load_page_content, write_artifact
+from src.artifacts import load_analyzed_article, write_artifact
 from src.models import PublishCopy
 from src.storage import atomic_write_text
 
@@ -17,12 +17,6 @@ def _normalize_text(value: object) -> str:
     return " ".join(str(value or "").split()).strip()
 
 
-def _normalize_title(value: object) -> str:
-    title = _normalize_text(value).strip("\"'“”‘’")
-    title = title.replace("#", "")
-    return title[:TITLE_MAX_LENGTH]
-
-
 def _ensure_minimum_hashtags(hashtags: list[str]) -> list[str]:
     result = list(hashtags)
     for fallback in ("英超", "足球新闻", "足球", "英超每日观察", "体育"):
@@ -34,26 +28,31 @@ def _ensure_minimum_hashtags(hashtags: list[str]) -> list[str]:
 
 
 def _build_source_material(output_dir: Path) -> dict[str, object]:
-    page_path = output_dir / "page.json"
     analysis_path = output_dir / "analysis.json"
-    page = load_page_content(page_path) if page_path.exists() else None
-    analysis = load_analyzed_article(analysis_path) if analysis_path.exists() else None
     script_path = output_dir / "script.txt"
-    script = script_path.read_text(encoding="utf-8").strip() if script_path.exists() else ""
     title_path = output_dir / "title.txt"
-    cover_title = (
-        _normalize_title(title_path.read_text(encoding="utf-8"))
-        if title_path.exists()
-        else ""
-    )
-    if page is None and analysis is None and not script:
+    missing = [
+        path.name
+        for path in (title_path, script_path, analysis_path)
+        if not path.exists()
+    ]
+    if missing:
         raise FileNotFoundError(
-            f"No article material found in {output_dir}; run steps 1 and 2 first"
+            f"Missing publish inputs in {output_dir}: {', '.join(missing)}"
         )
 
+    title = title_path.read_text(encoding="utf-8").strip()
+    if not title:
+        raise ValueError(f"Title is empty: {title_path}")
+    if len(title) > TITLE_MAX_LENGTH:
+        raise ValueError(
+            f"Title exceeds {TITLE_MAX_LENGTH} characters: {title_path}"
+        )
+    script = _normalize_text(script_path.read_text(encoding="utf-8"))
+    analysis = load_analyzed_article(analysis_path)
+
     return {
-        "cover_title": cover_title,
-        "original_title": page.title if page else "",
+        "title": title,
         "analysis": {
             key: getattr(analysis, key, "")
             for key in (
@@ -64,9 +63,9 @@ def _build_source_material(output_dir: Path) -> dict[str, object]:
                 "key_people_and_data",
                 "impact",
             )
-            if analysis and getattr(analysis, key, "")
+            if getattr(analysis, key, "")
         },
-        "script": script[:12000],
+        "script": script,
     }
 
 
@@ -158,8 +157,7 @@ def _local_hashtags(material: dict[str, object]) -> list[str]:
     primary_text = " ".join(
         str(value)
         for value in (
-            material.get("cover_title", ""),
-            material.get("original_title", ""),
+            material.get("title", ""),
             primary_analysis_text,
         )
     )
@@ -198,17 +196,7 @@ def generate_publish_copy(
     directory = Path(output_dir)
     material = _build_source_material(directory)
 
-    title = _normalize_title(material.get("cover_title"))
-    if not title:
-        analysis = material.get("analysis")
-        analysis_title = analysis.get("title_cn") if isinstance(analysis, dict) else ""
-        title = _normalize_title(
-            analysis_title
-            or material.get("original_title")
-        )
-    if not title:
-        raise ValueError("No publish title found in article outputs")
-
+    title = material.get("title", "")
     description = _local_description(material)
     hashtags = _local_hashtags(material)
     description, description_with_hashtags = _fit_publish_text(description, hashtags)
@@ -218,9 +206,32 @@ def generate_publish_copy(
         hashtags=hashtags,
         description_with_hashtags=description_with_hashtags,
     )
+    _validate_publish_result(result)
     write_artifact(directory / "publish.json", result)
-    atomic_write_text(directory / "title.txt", title)
     atomic_write_text(directory / "publish_title.txt", title)
     atomic_write_text(directory / "publish_description.txt", description_with_hashtags)
+    _validate_publish_outputs(directory, result)
     logger.info("Generated publish copy: %s", directory / "publish.json")
     return result.model_dump(exclude={"schema_version"})
+
+
+def _validate_publish_result(result: PublishCopy) -> None:
+    if not result.title or len(result.title) > TITLE_MAX_LENGTH:
+        raise ValueError("Publish title is empty or exceeds 30 characters")
+    if not result.description:
+        raise ValueError("Publish description is empty")
+    if not MIN_HASHTAGS <= len(result.hashtags) <= MAX_HASHTAGS:
+        raise ValueError("Publish hashtag count must be between 5 and 10")
+    if result.description_with_hashtags == "":
+        raise ValueError("Publish description with hashtags is empty")
+
+
+def _validate_publish_outputs(directory: Path, result: PublishCopy) -> None:
+    if (directory / "publish_title.txt").read_text(encoding="utf-8") != result.title:
+        raise ValueError("publish_title.txt does not match publish.json title")
+    if (
+        directory / "publish_description.txt"
+    ).read_text(encoding="utf-8") != result.description_with_hashtags:
+        raise ValueError(
+            "publish_description.txt does not match publish.json description"
+        )

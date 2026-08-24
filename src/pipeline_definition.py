@@ -190,7 +190,7 @@ def _build_pipeline_runner(context: PipelineContext) -> PipelineRunner:
         PipelineStep(
             name="publish-copy",
             action=_pipeline_publish,
-            inputs=_static_paths("page.json", "analysis.json", "script.txt", "title.txt"),
+            inputs=_static_paths("analysis.json", "script.txt", "title.txt"),
             outputs=_static_paths(
                 "publish.json",
                 "publish_title.txt",

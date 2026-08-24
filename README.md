@@ -152,6 +152,8 @@ target_chars = clamp(round(source_chars × 0.04 + 400), 500, 1000)
 
 `cover` 的图片输入优先使用 `cover.json.local_path`；该路径不可用时，回退到 `images.json` 中标记为 `is_cover=true` 的已下载图片，再回退到第一张可用已下载图片。它不会扫描目录或读取 `page.json` 的原始图片索引。标题只使用显式 `--title` 或 `title.txt`，不依赖第八步的发布标题。每个 PNG 写入临时文件后校验非空、格式有效和目标尺寸（竖版 `1080×1920`、横版 `1920×1080`），通过后才替换正式封面。
 
+`publish-copy` 只读取 `title.txt`、`script.txt` 和 `analysis.json`，完全本地生成，不调用 LLM 或网络请求。`title.txt` 是唯一标题来源：标题为空或超过 30 个字符时直接报错，不自动回退到原文标题或分析标题，也不会被发布阶段改写。发布阶段只写入 `publish.json`、`publish_title.txt` 和 `publish_description.txt`，并校验标题、简介、标签数量及文本文件一致性。
+
 ## 命令
 
 ```bash
@@ -166,11 +168,16 @@ target_chars = clamp(round(source_chars × 0.04 + 400), 500, 1000)
 .venv/bin/python main.py cover --dir "$OUT"
 .venv/bin/python main.py publish-copy --dir "$OUT"
 
+# 验证八个阶段和最终产物；只读，不联网、不调用 LLM
+.venv/bin/python main.py verify --dir "$OUT"
+
 # 删除视频编码失败时留下的中间帧
 .venv/bin/python main.py cleanup --dir "$OUT"
 ```
 
 `run --from`、`run --to` 和 `run --force` 均只接受上述八个阶段名。
+
+`verify` 是八个阶段之后的只读交付检查，不是第九个 Pipeline 阶段。它检查 `manifest.json` 中的八阶段状态、最终文件、视频和封面参数、发布文案一致性以及是否残留 `frames/`；通过时返回成功状态，失败时返回非零退出码。它不会联网、调用 LLM 或修改输出目录。
 
 ## 环境要求
 

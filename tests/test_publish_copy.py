@@ -117,19 +117,30 @@ def test_local_hashtags_add_broad_topics_and_secondary_clubs(tmp_path):
     ]
 
 
-def test_generate_publish_copy_limits_title_and_total_description(tmp_path):
+def test_generate_publish_copy_rejects_title_longer_than_limit(tmp_path):
     _write_article_outputs(
         tmp_path,
-        "这是一个超过三十个字符而且需要被严格截断的中文封面标题用于测试一致性",
+        "这是一个超过三十个字符而且应该直接失败的中文封面标题用于测试一致性",
     )
     analysis = json.loads((tmp_path / "analysis.json").read_text(encoding="utf-8"))
-    analysis["overview"] = "简介" * 600
-    (tmp_path / "analysis.json").write_text(
-        json.dumps(analysis, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    with __import__("pytest").raises(ValueError, match="exceeds 30 characters"):
+        generate_publish_copy(str(tmp_path))
+
+
+def test_generate_publish_copy_does_not_require_page_manifest(tmp_path):
+    _write_article_outputs(tmp_path, "只依赖最终产物")
+    (tmp_path / "page.json").unlink()
 
     result = generate_publish_copy(str(tmp_path))
 
-    assert len(result["title"]) == 30
-    assert len(result["description_with_hashtags"]) <= 1000
+    assert result["title"] == "只依赖最终产物"
+
+
+def test_generate_publish_copy_reports_missing_inputs(tmp_path):
+    (tmp_path / "title.txt").write_text("标题", encoding="utf-8")
+
+    with __import__("pytest").raises(
+        FileNotFoundError,
+        match="Missing publish inputs.*script.txt, analysis.json",
+    ):
+        generate_publish_copy(str(tmp_path))

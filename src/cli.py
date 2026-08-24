@@ -8,7 +8,7 @@ from src.pipeline_definition import (
     run_content_audio_pipeline,
     run_pipeline_step,
 )
-from src.workflow import run_cleanup_only, run_doctor
+from src.workflow import run_cleanup_only, run_doctor, run_verify_only
 
 logging.basicConfig(
     level=logging.INFO,
@@ -157,6 +157,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     clean.add_argument("--dir", required=True, help="Output directory of the article")
 
+    verify = sub.add_parser(
+        "verify",
+        help="Verify a completed article output directory without changing files",
+    )
+    verify.add_argument("--dir", required=True, help="Completed article output directory")
+
     doctor = sub.add_parser(
         "doctor",
         help="Check configuration and runtime dependencies",
@@ -213,6 +219,9 @@ def main() -> None:
         asyncio.run(run_pipeline_step("publish-copy", args.dir, force=args.force))
     elif args.cmd == "cleanup":
         run_cleanup_only(args.dir)
+    elif args.cmd == "verify":
+        if not run_verify_only(args.dir):
+            raise SystemExit(1)
     elif args.cmd == "doctor":
         passed = asyncio.run(
             run_doctor(
