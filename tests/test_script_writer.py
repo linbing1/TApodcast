@@ -1,6 +1,8 @@
 from unittest.mock import MagicMock
 
-from src.models import AnalyzedArticle, PodcastScript, SourceFact
+import pytest
+
+from src.models import AnalyzedArticle, PodcastScript
 from src.script_writer import (
     MAX_SCRIPT_CHARS,
     MIN_SCRIPT_CHARS,
@@ -28,15 +30,6 @@ def _make_analyzed() -> AnalyzedArticle:
         key_people_and_data="萨卡：2球",
         impact="阿森纳升至榜首",
         link="https://example.com/1",
-        source_facts=[
-            SourceFact(
-                fact_id="F001",
-                claim="阿森纳在主场击败曼城。",
-                evidence="Arsenal beat Manchester City at home.",
-                category="比赛",
-                importance="critical",
-            )
-        ],
     )
 
 
@@ -59,7 +52,7 @@ class TestWriteScript:
         assert "阿森纳在主场击败曼城" in user_arg
         assert "萨卡：2球" in user_arg
         assert "阿森纳升至榜首" in user_arg
-        assert "F001" in user_arg
+        assert "事实清单" not in user_arg
 
     def test_strips_whitespace_from_response(self):
         mock_llm = MagicMock()
@@ -87,6 +80,23 @@ class TestWriteScript:
         _, user_arg = mock_llm.complete.call_args.args
         assert "目标播报稿总长度约为 770 字" in user_arg
         assert "不需要后续再次调用模型压缩或扩充" in user_arg
+
+    def test_rejects_response_missing_fixed_closing(self):
+        mock_llm = MagicMock()
+        mock_llm.complete.return_value = "欢迎收听英超每日观察，今天是今天。阿森纳主场取胜。"
+
+        with pytest.raises(ValueError, match="missing required closing"):
+            write_script(_make_analyzed(), mock_llm)
+
+    def test_rejects_markdown_fence_in_response(self):
+        mock_llm = MagicMock()
+        mock_llm.complete.return_value = (
+            "欢迎收听英超每日观察，今天是今天。```阿森纳主场取胜。"
+            "感谢收听，更多内容请关注英超每日观察。"
+        )
+
+        with pytest.raises(ValueError, match="Markdown code fence"):
+            write_script(_make_analyzed(), mock_llm)
 
 
 def test_count_source_chars_removes_whitespace():

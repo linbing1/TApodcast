@@ -1,9 +1,7 @@
-import json
-
 from src.llm import LLMClient
 from src.models import AnalyzedArticle, PodcastScript
 
-PROMPT_VERSION = "script-writer-v5"
+PROMPT_VERSION = "script-writer-v6"
 
 MIN_SCRIPT_CHARS = 500
 MAX_SCRIPT_CHARS = 1000
@@ -15,10 +13,10 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一位专业的短视频播客主播。请将
 要求：
 - 开头固定为："欢迎收听英超每日观察，今天是{date_str}，"
 - 结尾固定为："感谢收听，更多内容请关注英超每日观察。"
-- 内容严格来自文章原文，禁止添加任何个人评论、推测或文章中未提及的信息
-- 在目标长度内优先保留核心结论、关键论据、数据、人名和最重要的具体细节
-- 必须覆盖事实清单中的所有 critical 事实；如果目标长度与完整性冲突，优先保证事实准确和 critical 事实完整
-- 按原文逻辑顺序展开，不要为了凑字数添加或重复内容
+- 内容只基于给定新闻分析，禁止添加个人评论、推测或原文未提及的信息
+- 聚焦最值得播报的核心主题、结果、人物和关键数字；允许省略次要背景和细节
+- 不要把比赛比分、转会状态、主要人物或球队讲反
+- 按自然的新闻叙事展开，不要为了凑字数添加或重复内容
 - 使用口语化表达，避免书面语和长难句
 - 语气自然，像在和球迷朋友聊球
 
@@ -65,8 +63,7 @@ def write_script(
         f"关键人物与数据：{article.key_people_and_data}\n"
         f"影响分析：{article.impact}\n"
         f"{length_instruction}"
-        "必须覆盖的原文事实清单：\n"
-        f"{json.dumps([fact.model_dump() for fact in article.source_facts], ensure_ascii=False)}"
+        "请直接输出最终可播报的口语稿。"
     )
     text = llm.complete(
         system_prompt,
@@ -74,4 +71,20 @@ def write_script(
         stage="write-script",
         prompt_version=PROMPT_VERSION,
     ).strip()
+    validate_script(text)
     return PodcastScript(text=text)
+
+
+def validate_script(text: str) -> None:
+    """Reject empty or visibly non-broadcastable LLM responses without another LLM call."""
+    errors = []
+    if not text:
+        errors.append("script is empty")
+    if text and not text.startswith("欢迎收听英超每日观察，今天是"):
+        errors.append("missing required opening")
+    if text and not text.endswith("感谢收听，更多内容请关注英超每日观察。"):
+        errors.append("missing required closing")
+    if "```" in text:
+        errors.append("contains Markdown code fence")
+    if errors:
+        raise ValueError(f"Invalid podcast script: {', '.join(errors)}")

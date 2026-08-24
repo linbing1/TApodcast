@@ -14,7 +14,7 @@ from main import (
     run_cover_only,
     run_pipeline_step,
     run_publish_only,
-    write_script_draft,
+    write_script_command,
 )
 from src.models import ImageAsset, PageContent, PodcastScript, ScrapedArticle, VideoAsset
 from src.pipeline import PipelineContext
@@ -30,8 +30,6 @@ def test_pipeline_registers_all_publish_stages(tmp_path):
         "download-images",
         "analyze-content",
         "write-script",
-        "review-content",
-        "finalize-content",
         "generate-audio",
         "video",
         "cover",
@@ -177,15 +175,15 @@ async def test_run_pipeline_step_force_keeps_llm_cache_enabled(
     )
     mock_build_runner.return_value.run = AsyncMock()
 
-    await run_pipeline_step("review-content", str(output_dir), force=True)
+    await run_pipeline_step("write-script", str(output_dir), force=True)
 
     context = mock_build_runner.call_args.args[0]
     assert context.llm_cache_enabled is True
     mock_build_runner.return_value.run.assert_awaited_once_with(
         resume=True,
-        from_step="review-content",
-        to_step="review-content",
-        force_steps={"review-content"},
+        from_step="write-script",
+        to_step="write-script",
+        force_steps={"write-script"},
     )
 
 
@@ -265,11 +263,11 @@ async def test_generate_audio_runs_audio_assets_only(mock_audio_assets, tmp_path
     mock_audio_assets.assert_awaited_once_with(str(output_dir))
 
 
-def test_write_script_draft_passes_linear_source_length_target(tmp_path):
+def test_write_script_command_writes_final_content_and_removes_old_outputs(tmp_path):
     output_dir = tmp_path / "article"
     output_dir.mkdir()
     (output_dir / "analysis.json").write_text("{}", encoding="utf-8")
-    analyzed = object()
+    analyzed = type("Analyzed", (), {"title_cn": "中文标题"})()
     llm = object()
 
     with (
@@ -284,12 +282,30 @@ def test_write_script_draft_passes_linear_source_length_target(tmp_path):
             full_text="阿" * 10_000,
         )
 
-        result = write_script_draft(str(output_dir))
+        for filename in (
+            "script-draft.txt",
+            "content-review.json",
+            "content-quality.json",
+            "title-candidate.txt",
+            "script-candidate.txt",
+        ):
+            (output_dir / filename).write_text("old", encoding="utf-8")
+
+        result = write_script_command(str(output_dir))
 
     assert result == str(output_dir)
     assert mock_write.call_args.args == (analyzed, llm)
     assert mock_write.call_args.kwargs["target_chars"] == 800
-    assert (output_dir / "script-draft.txt").read_text(encoding="utf-8") == "稿件"
+    assert (output_dir / "title.txt").read_text(encoding="utf-8") == "中文标题"
+    assert (output_dir / "script.txt").read_text(encoding="utf-8") == "稿件"
+    for filename in (
+        "script-draft.txt",
+        "content-review.json",
+        "content-quality.json",
+        "title-candidate.txt",
+        "script-candidate.txt",
+    ):
+        assert not (output_dir / filename).exists()
 
 
 @pytest.mark.asyncio

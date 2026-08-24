@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 SCHEMA_VERSION = 3
-PIPELINE_VERSION = "4"
+PIPELINE_VERSION = "5"
 MANIFEST_FILENAME = "manifest.json"
 
 

@@ -13,18 +13,10 @@ from src.analyzer import PROMPT_VERSION as ANALYZER_PROMPT_VERSION
 from src.analyzer import analyze_article
 from src.artifacts import (
     load_analyzed_article,
-    load_content_quality_report,
-    load_content_review,
     load_page_content,
     write_artifact,
 )
 from src.config import get_config, get_llm_max_requests
-from src.content_quality import (
-    REVIEW_PROMPT_VERSION,
-    REWRITE_PROMPT_VERSION,
-    finalize_content,
-    review_content,
-)
 from src.cover_renderer import generate_cover, generate_cover_landscape
 from src.doctor import format_doctor_report, run_doctor_checks
 from src.image_captioner import PROMPT_VERSION as IMAGE_CAPTION_PROMPT_VERSION
@@ -64,8 +56,6 @@ PIPELINE_STEP_NAMES = (
     "download-images",
     "analyze-content",
     "write-script",
-    "review-content",
-    "finalize-content",
     "generate-audio",
     "video",
     "cover",
@@ -351,14 +341,14 @@ def analyze_content(
         usage_callback=usage_callback,
     )
 
-    logger.info("Analyzing article and extracting traceable source facts...")
+    logger.info("Summarizing article for a short news video...")
     analyzed = analyze_article(article, llm)
     write_artifact(os.path.join(output_dir, "analysis.json"), analyzed)
     logger.info("Analysis output: %s", os.path.join(output_dir, "analysis.json"))
     return output_dir
 
 
-def write_script_draft(
+def write_script_command(
     output_dir: str,
     *,
     cache_enabled: bool = True,
@@ -378,7 +368,7 @@ def write_script_draft(
     )
 
     logger.info(
-        "Writing first podcast script draft (source=%d chars, target=%d chars)...",
+        "Writing final podcast script (source=%d chars, target=%d chars)...",
         source_chars,
         target_chars,
     )
@@ -388,108 +378,20 @@ def write_script_draft(
         date_str=_speech_date(),
         target_chars=target_chars,
     )
-    atomic_write_text(os.path.join(output_dir, "script-draft.txt"), script.text)
-    logger.info("Draft output: %s", os.path.join(output_dir, "script-draft.txt"))
-    return output_dir
-
-
-def review_content_command(
-    output_dir: str,
-    *,
-    cache_enabled: bool = True,
-    usage_callback: Callable[[], None] | None = None,
-) -> str:
-    article = _load_source_article(output_dir)
-    analyzed = load_analyzed_article(os.path.join(output_dir, "analysis.json"))
-    draft_path = Path(output_dir) / "script-draft.txt"
-    if not draft_path.exists():
-        raise FileNotFoundError(f"Podcast script draft not found: {draft_path}")
-    script = PodcastScript(text=draft_path.read_text(encoding="utf-8").strip())
-    llm = _create_llm_client(
-        output_dir,
-        cache_enabled=cache_enabled,
-        usage_callback=usage_callback,
-    )
-
-    logger.info("Reviewing draft against the original article and source facts...")
-    review = review_content(article, analyzed, script, llm)
-    write_artifact(os.path.join(output_dir, "content-review.json"), review)
-    logger.info(
-        "Initial content review: %s (overall=%d)",
-        "passed" if review.passed else "needs revision",
-        review.scores.overall,
-    )
-    return output_dir
-
-
-def finalize_content_command(
-    output_dir: str,
-    *,
-    cache_enabled: bool = True,
-    usage_callback: Callable[[], None] | None = None,
-) -> str:
-    article = _load_source_article(output_dir)
-    analyzed = load_analyzed_article(os.path.join(output_dir, "analysis.json"))
-    initial_review = load_content_review(
-        os.path.join(output_dir, "content-review.json")
-    )
-    draft_path = Path(output_dir) / "script-draft.txt"
-    if not draft_path.exists():
-        raise FileNotFoundError(f"Podcast script draft not found: {draft_path}")
-    initial_script = PodcastScript(
-        text=draft_path.read_text(encoding="utf-8").strip()
-    )
-    quality_path = Path(output_dir) / "content-quality.json"
-    previous_report = None
-    if quality_path.exists():
-        previous_report = load_content_quality_report(quality_path)
-    llm = _create_llm_client(
-        output_dir,
-        cache_enabled=cache_enabled,
-        usage_callback=usage_callback,
-    )
-
-    logger.info("Finalizing content through the review and rewrite gate...")
-    final_title_path = Path(output_dir) / "title.txt"
-    final_script_path = Path(output_dir) / "script.txt"
-    final_title_path.unlink(missing_ok=True)
-    final_script_path.unlink(missing_ok=True)
-    final_title, final_script, report = finalize_content(
-        article,
-        analyzed,
-        initial_script,
-        initial_review,
-        llm,
-        date_str=_speech_date(),
-        previous_report=previous_report,
-    )
-    write_artifact(quality_path, report)
-    if not report.passed:
-        title_candidate_path = Path(output_dir) / "title-candidate.txt"
-        candidate_path = Path(output_dir) / "script-candidate.txt"
-        atomic_write_text(title_candidate_path, final_title)
-        atomic_write_text(candidate_path, final_script.text)
-        budget_status = (
-            "revision budget exhausted"
-            if report.revision_budget_exhausted
-            else "no eligible automatic rewrite"
-        )
-        raise ValueError(
-            "Content quality gate failed; "
-            f"{budget_status} ({report.revision_budget_used}/"
-            f"{report.max_revisions} revision(s)): "
-            f"{report.final_review.summary or 'review the content-quality.json report'}"
-        )
-
-    atomic_write_text(final_title_path, final_title)
-    atomic_write_text(final_script_path, final_script.text)
-    for filename in ("title-candidate.txt", "script-candidate.txt"):
+    title = analyzed.title_cn.strip()
+    if not title:
+        raise ValueError("Article analysis did not provide a Chinese title")
+    atomic_write_text(os.path.join(output_dir, "title.txt"), title)
+    atomic_write_text(os.path.join(output_dir, "script.txt"), script.text)
+    for filename in (
+        "script-draft.txt",
+        "content-review.json",
+        "content-quality.json",
+        "title-candidate.txt",
+        "script-candidate.txt",
+    ):
         (Path(output_dir) / filename).unlink(missing_ok=True)
-    logger.info(
-        "Content quality gate passed (overall=%d): %s",
-        report.final_review.scores.overall,
-        os.path.join(output_dir, "script.txt"),
-    )
+    logger.info("Content output: %s", os.path.join(output_dir, "script.txt"))
     return output_dir
 
 
@@ -548,23 +450,7 @@ def _pipeline_analyze_content(context: PipelineContext) -> None:
 
 
 def _pipeline_write_script(context: PipelineContext) -> None:
-    write_script_draft(
-        context.output_dir,
-        cache_enabled=context.llm_cache_enabled,
-        usage_callback=context.llm_usage_callback,
-    )
-
-
-def _pipeline_review_content(context: PipelineContext) -> None:
-    review_content_command(
-        context.output_dir,
-        cache_enabled=context.llm_cache_enabled,
-        usage_callback=context.llm_usage_callback,
-    )
-
-
-def _pipeline_finalize_content(context: PipelineContext) -> None:
-    finalize_content_command(
+    write_script_command(
         context.output_dir,
         cache_enabled=context.llm_cache_enabled,
         usage_callback=context.llm_usage_callback,
@@ -631,8 +517,6 @@ def _prompt_versions() -> dict[str, str]:
         "analyzer": ANALYZER_PROMPT_VERSION,
         "image_captioner": IMAGE_CAPTION_PROMPT_VERSION,
         "script_writer": SCRIPT_PROMPT_VERSION,
-        "content_reviewer": REVIEW_PROMPT_VERSION,
-        "content_rewriter": REWRITE_PROMPT_VERSION,
         "publish_copy": PUBLISH_PROMPT_VERSION,
     }
 
@@ -662,31 +546,10 @@ def _build_pipeline_runner(context: PipelineContext) -> PipelineRunner:
         PipelineStep(
             name="write-script",
             action=_pipeline_write_script,
-            inputs=_static_paths("analysis.json"),
-            outputs=_static_paths("script-draft.txt"),
+            inputs=_static_paths("page.json", "analysis.json"),
+            outputs=_static_paths("title.txt", "script.txt"),
             configuration_keys=("llm_base_url", "llm_model"),
             prompt_keys=("script_writer",),
-        ),
-        PipelineStep(
-            name="review-content",
-            action=_pipeline_review_content,
-            inputs=_static_paths("page.json", "analysis.json", "script-draft.txt"),
-            outputs=_static_paths("content-review.json"),
-            configuration_keys=("llm_base_url", "llm_model"),
-            prompt_keys=("content_reviewer",),
-        ),
-        PipelineStep(
-            name="finalize-content",
-            action=_pipeline_finalize_content,
-            inputs=_static_paths(
-                "page.json",
-                "analysis.json",
-                "script-draft.txt",
-                "content-review.json",
-            ),
-            outputs=_static_paths("content-quality.json", "title.txt", "script.txt"),
-            configuration_keys=("llm_base_url", "llm_model"),
-            prompt_keys=("content_reviewer", "content_rewriter"),
         ),
         PipelineStep(
             name="generate-audio",
@@ -885,10 +748,8 @@ def main() -> None:
     dl.add_argument("--force", action="store_true", help="Regenerate this stage")
 
     content_commands = {
-        "analyze-content": "Extract analysis and traceable facts from the article",
-        "write-script": "Generate the first podcast script draft",
-        "review-content": "Review the draft against the original article",
-        "finalize-content": "Rewrite until the content quality gate passes",
+        "analyze-content": "Summarize the article for a short news video",
+        "write-script": "Generate the final title and podcast script",
     }
     for command, help_text in content_commands.items():
         content = sub.add_parser(command, help=help_text)
@@ -985,8 +846,6 @@ def main() -> None:
     elif args.cmd in {
         "analyze-content",
         "write-script",
-        "review-content",
-        "finalize-content",
     }:
         asyncio.run(run_pipeline_step(args.cmd, args.dir, force=args.force))
     elif args.cmd == "generate-audio":

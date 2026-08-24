@@ -26,7 +26,7 @@ def test_manifest_records_completed_step_and_reloads(tmp_path):
 
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 3
-    assert manifest["pipeline_version"] == "4"
+    assert manifest["pipeline_version"] == "5"
     assert manifest["article_url"] == "https://example.com/article"
 
 
@@ -53,7 +53,7 @@ def test_manifest_migrates_schema_v1(tmp_path):
 
     migrated = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert migrated["schema_version"] == 3
-    assert migrated["pipeline_version"] == "4"
+    assert migrated["pipeline_version"] == "5"
     assert migrated["configuration"]["llm_model"] == "test-model"
     assert migrated["prompt_versions"]["analyzer"] == "v1"
     assert migrated["llm_usage"]["api_requests"] == 0
@@ -67,18 +67,18 @@ def test_manifest_syncs_llm_usage_summary(tmp_path):
         "\n".join([
             json.dumps({
                 "event": "api_request",
-                "stage": "review-content",
+                "stage": "write-script",
                 "prompt_tokens": 100,
                 "completion_tokens": 50,
                 "total_tokens": 150,
             }),
             json.dumps({
                 "event": "cache_hit",
-                "stage": "review-content",
+                "stage": "write-script",
             }),
             json.dumps({
                 "event": "api_request",
-                "stage": "finalize-content",
+                "stage": "image-captioner",
                 "prompt_tokens": 80,
                 "completion_tokens": 120,
                 "total_tokens": 200,
@@ -110,7 +110,7 @@ def test_manifest_syncs_llm_usage_summary(tmp_path):
     assert usage["remaining_requests"] == 0
     assert usage["budget_exhausted"] is True
     assert usage["stopped_before_stage"] == "generate-audio"
-    assert usage["by_stage"]["review-content"] == {
+    assert usage["by_stage"]["write-script"] == {
         "api_requests": 1,
         "cache_hits": 1,
         "prompt_tokens": 100,

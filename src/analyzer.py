@@ -1,5 +1,4 @@
 import json
-import logging
 
 from pydantic import ValidationError
 
@@ -7,23 +6,10 @@ from src.llm import LLMClient
 from src.llm_json import loads as loads_llm_json
 from src.models import AnalyzedArticle, ScrapedArticle
 
-logger = logging.getLogger(__name__)
-
 _ANALYZED_FIELDS = set(AnalyzedArticle.model_fields) - {"schema_version"}
-_REQUIRED_ANALYZED_FIELDS = _ANALYZED_FIELDS - {"source_facts"}
+_REQUIRED_ANALYZED_FIELDS = _ANALYZED_FIELDS
 _TITLE_MAX_LENGTH = 30
-PROMPT_VERSION = "analyzer-v3"
-_IMPORTANCE_ALIASES = {
-    "critical": "critical",
-    "关键": "critical",
-    "核心": "critical",
-    "重要": "critical",
-    "supporting": "supporting",
-    "support": "supporting",
-    "支持": "supporting",
-    "辅助": "supporting",
-    "次要": "supporting",
-}
+PROMPT_VERSION = "analyzer-v5"
 _TEXT_FIELDS = {
     "title_original",
     "article_type",
@@ -34,25 +20,19 @@ _TEXT_FIELDS = {
     "link",
 }
 
-_SYSTEM_PROMPT = """你是一位资深英超足球记者和分析师。请对以下英超文章进行深度中文分析。
+_SYSTEM_PROMPT = """你是一位英超新闻编辑。请为一条即将发布到抖音的中文英超新闻视频整理简明、可靠的中文内容上下文。
 
-核心原则：尽量保留原文的丰富内容，不要过度精简。读者希望通过你的分析获取接近原文的信息量，而不仅仅是摘要。
+核心原则：聚焦最值得播报的新闻主题、比赛结果、转会进展、关键人物和数字。可以省略次要背景和细节；不要补充原文没有的信息，也不要把主要事实、比分、转会状态或人物关系讲反。
 
 返回一个 JSON 对象，包含：
-- title_cn: 适合抖音作品和封面的中文标题，不超过30个汉字；准确概括核心事件并突出人物、冲突或悬念，要有吸引力但不夸大、不虚构，不使用“震惊”“速看”等空洞标题党词语
+- title_cn: 用于视频封面、视频文件和抖音发布的中文标题，不超过30个汉字。标题必须让球迷产生“想点开看看发生了什么”的兴趣，而不是平铺直叙地复述文章原标题。优先从原文中提炼一个明确的新闻钩子：意外结果、关键转折、潜在影响、人物选择、转会悬念、战术问题或冲突；尽量采用“核心事件 + 为什么值得关注”的结构，也可以使用有依据的疑问或悬念表达。标题要具体、有画面感、有信息量，至少包含核心人物/球队/事件中的关键元素；吸引力必须来自原文事实，不能夸大、虚构、故意制造错误悬念，不使用“震惊”“速看”“太意外了”等空洞标题党词语
 - title_original: 英文原标题
 - article_type: 文章类型（深度分析/新闻报道/战术解读/转会动态/赛后分析）
-- overview: 3-5 句话概述核心论点，包含关键结论和背景（中文）
-- detail: 深度转述原文内容，要求：（1）保留原文中所有重要论据、数据、直接引语、战术细节和具体事例；（2）按原文逻辑结构组织，不要遗漏关键段落；（3）深度分析类 800-1200 字，普通新闻 400-600 字（中文）
-- key_people_and_data: 涉及的关键人物和数据，列出所有被提及的人名、具体数据和统计（中文）
-- impact: 影响分析与展望，包含短期和中长期影响（中文）
+- overview: 2-4 句话概述最重要的事件、结果和背景（中文）
+- detail: 用 300-600 个汉字按新闻叙事整理核心信息，优先保留影响理解主题的事实、关键细节和引语；不需要覆盖全文
+- key_people_and_data: 与主题直接相关的人物、球队、数字和时间点（中文）
+- impact: 这条新闻对球队、联赛或后续事件最直接的影响；原文没有明确影响时留空（中文）
 - link: 原文链接
-- source_facts: 可供后续审校逐项核对的事实清单，数组中每项包含：
-  - fact_id: 从 F001 开始连续编号
-  - claim: 忠实转述的中文事实，不加入推测
-  - evidence: 支撑该事实的原文短句或关键措辞
-  - category: 人物/转会/比赛/数据/引语/背景/影响之一
-  - importance: 只能填英文 "critical" 或 "supporting"，禁止翻译成中文；播报稿必须覆盖所有 critical 事实
 
 重要格式要求：
 - 仅返回 JSON 对象，不要添加任何其他文字"""
@@ -87,38 +67,6 @@ def _normalize_text(value: object) -> str:
     return str(value).strip()
 
 
-def _normalize_importance(value: object) -> object:
-    if not isinstance(value, str):
-        return value
-    key = " ".join(value.split()).lower()
-    if key in _IMPORTANCE_ALIASES:
-        return _IMPORTANCE_ALIASES[key]
-    logger.warning(
-        "Unknown source fact importance %r, defaulting to supporting", value
-    )
-    return "supporting"
-
-
-def _normalize_source_facts(value: object) -> object:
-    if isinstance(value, dict):
-        value = value.get("facts") or value.get("items") or value.get("source_facts")
-    if not isinstance(value, list):
-        return value
-    facts = []
-    for item in value:
-        if not isinstance(item, dict):
-            facts.append(item)
-            continue
-        normalized = dict(item)
-        for field in ("fact_id", "claim", "evidence", "category", "importance"):
-            if field in normalized:
-                normalized[field] = _normalize_text(normalized[field])
-        if "importance" in normalized:
-            normalized["importance"] = _normalize_importance(normalized["importance"])
-        facts.append(normalized)
-    return facts
-
-
 def analyze_article(article: ScrapedArticle, llm: LLMClient) -> AnalyzedArticle:
     user_text = f"Title: {article.title}\nLink: {article.link}\nContent:\n{article.full_text}"
     response = llm.complete(
@@ -132,10 +80,6 @@ def analyze_article(article: ScrapedArticle, llm: LLMClient) -> AnalyzedArticle:
     filtered = {k: v for k, v in data.items() if k in _ANALYZED_FIELDS}
     for field in _TEXT_FIELDS & filtered.keys():
         filtered[field] = _normalize_text(filtered[field])
-    if "source_facts" in filtered:
-        filtered["source_facts"] = _normalize_source_facts(
-            filtered["source_facts"]
-        )
     if "title_cn" in filtered:
         filtered["title_cn"] = " ".join(str(filtered["title_cn"]).split()).strip(
             "\"'“”‘’# "
@@ -144,15 +88,8 @@ def analyze_article(article: ScrapedArticle, llm: LLMClient) -> AnalyzedArticle:
     missing = _REQUIRED_ANALYZED_FIELDS - set(filtered)
     if missing:
         raise ValueError(f"LLM response missing required fields {missing}: {response[:200]}")
-    if not filtered.get("source_facts"):
-        raise ValueError(f"LLM response missing source facts: {response[:200]}")
     try:
         analyzed = AnalyzedArticle(**filtered)
     except ValidationError as e:
         raise ValueError(f"Invalid analyzed article response: {response[:200]}") from e
-    fact_ids = [fact.fact_id for fact in analyzed.source_facts]
-    if len(fact_ids) != len(set(fact_ids)):
-        raise ValueError("LLM response contains duplicate source fact IDs")
-    if not any(fact.importance == "critical" for fact in analyzed.source_facts):
-        raise ValueError("LLM response contains no critical source facts")
     return analyzed
